@@ -530,10 +530,10 @@ spec:
       containers:
         - name: backend
           #image: node:18-alpine
-          image: itssolutions-backend:latest
+          image: komlan2019/itssolutions-backend:latest
           #imagePullPolicy: IfNotPresent
           imagePullPolicy: Never
-          
+
           command:
             - sh
             - /app/entrypoint.sh
