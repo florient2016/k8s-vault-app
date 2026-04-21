@@ -120,7 +120,9 @@ log_success "PostgreSQL init credentials stored at secret/itssolutions/db-init"
 # =============================================================================
 log_step "STEP 5: Creating itssolutions-policy"
 
-vault_exec policy write itssolutions-policy - <<'EOF'
+# Write policy to a temporary file locally
+POLICY_FILE=$(mktemp /tmp/itssolutions-policy-XXXXXX.hcl)
+cat > "${POLICY_FILE}" <<'EOF'
 # Read access to PostgreSQL credentials
 path "secret/data/itssolutions/db-creds" {
   capabilities = ["read"]
@@ -136,6 +138,18 @@ path "secret/data/itssolutions/db-init" {
   capabilities = ["read"]
 }
 EOF
+
+# Copy the policy file into the Vault pod
+kubectl cp "${POLICY_FILE}" vault/vault-0:/tmp/itssolutions-policy.hcl
+
+# Create the policy from the file inside the pod
+kubectl exec -n vault vault-0 -- \
+  env VAULT_TOKEN="${ROOT_TOKEN}" VAULT_ADDR="http://127.0.0.1:8200" \
+  vault policy write itssolutions-policy /tmp/itssolutions-policy.hcl
+
+# Cleanup
+kubectl exec -n vault vault-0 -- rm -f /tmp/itssolutions-policy.hcl
+rm -f "${POLICY_FILE}"
 
 log_success "Policy itssolutions-policy created"
 
