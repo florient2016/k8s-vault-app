@@ -529,9 +529,11 @@ spec:
 
       containers:
         - name: backend
-          image: node:18-alpine
-          imagePullPolicy: IfNotPresent
-
+          #image: node:18-alpine
+          image: itssolutions-backend:latest
+          #imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
+          
           command:
             - sh
             - /app/entrypoint.sh
