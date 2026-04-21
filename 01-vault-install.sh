@@ -87,28 +87,53 @@ POD_PHASE=$(kubectl get pod vault-0 -n "${VAULT_NAMESPACE}" \
 [[ "${POD_PHASE}" == "Running" ]] || \
   log_error "vault-0 not Running after 5 min"
 
-# -----------------------------------------------------------------------------
-# Step 4 — Initialize Vault
-# -----------------------------------------------------------------------------
-log_info "Checking Vault initialization status..."
+# =============================================================================
+# STEP 4 — Initialize and Unseal Vault
+# =============================================================================
+log_step "STEP 4: Initializing and unsealing Vault"
 
-INIT_STATUS=$(kubectl exec -n "${VAULT_NAMESPACE}" vault-0 -- \
-  vault status -format=json 2>/dev/null | jq -r '.initialized' || echo "false")
+INIT_FILE="/tmp/vault-init.json"
 
-if [[ "${INIT_STATUS}" == "true" ]]; then
-  log_warn "Vault already initialized — skipping init"
-  [[ -f "${INIT_FILE}" ]] || \
-    log_error "Vault initialized but ${INIT_FILE} not found"
+# Check if Vault is already initialized
+INITIALIZED=$(kubectl exec -n vault vault-0 -- \
+  vault status -format=json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['initialized'])" 2>/dev/null || echo "false")
+
+if [ "${INITIALIZED}" = "True" ] || [ "${INITIALIZED}" = "true" ]; then
+  log_info "Vault is already initialized"
+
+  if [ -f "${INIT_FILE}" ]; then
+    log_info "Found existing init file at ${INIT_FILE}"
+  else
+    log_error "Vault is initialized but ${INIT_FILE} not found — cannot unseal automatically"
+    log_error "Manually provide the unseal key and root token, then re-run"
+    exit 1
+  fi
 else
   log_info "Initializing Vault (1 key share, threshold 1)..."
-  kubectl exec -n "${VAULT_NAMESPACE}" vault-0 -- \
-    vault operator init \
-      -key-shares=1 \
-      -key-threshold=1 \
-      -format=json > "${INIT_FILE}"
-  chmod 600 "${INIT_FILE}"
+  kubectl exec -n vault vault-0 -- \
+    vault operator init -key-shares=1 -key-threshold=1 -format=json \
+    > "${INIT_FILE}"
   log_success "Vault initialized — credentials saved to ${INIT_FILE}"
 fi
+
+# Read unseal key and root token from file
+UNSEAL_KEY=$(python3 -c "import json; d=json.load(open('${INIT_FILE}')); print(d['unseal_keys_b64'][0])")
+ROOT_TOKEN=$(python3 -c "import json; d=json.load(open('${INIT_FILE}')); print(d['root_token'])")
+
+# Check if Vault is sealed
+SEALED=$(kubectl exec -n vault vault-0 -- \
+  vault status -format=json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['sealed'])" 2>/dev/null || echo "true")
+
+if [ "${SEALED}" = "True" ] || [ "${SEALED}" = "true" ]; then
+  log_info "Unsealing Vault..."
+  kubectl exec -n vault vault-0 -- vault operator unseal "${UNSEAL_KEY}"
+  log_success "Vault unsealed"
+else
+  log_info "Vault is already unsealed"
+fi
+
+log_success "Vault is ready (initialized and unsealed)"
+
 
 # -----------------------------------------------------------------------------
 # Step 5 — Unseal
