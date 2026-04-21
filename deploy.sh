@@ -25,37 +25,6 @@ log_step()    { echo -e "\n${CYAN}==============================${NC}"; \
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# =============================================================================
-# Verify nodes exist
-# =============================================================================
-log_step "Verifying cluster nodes"
-
-for NODE in worker1 worker2; do
-  if kubectl get node "${NODE}" &>/dev/null; then
-    STATUS=$(kubectl get node "${NODE}" -o jsonpath='{.status.conditions[-1].type}')
-    log_success "Node ${NODE} found — status: ${STATUS}"
-  else
-    log_error "Node ${NODE} not found in cluster. Check node names with: kubectl get nodes"
-  fi
-done
-
-# Verify local paths exist on nodes
-log_info "Verifying local storage paths on nodes..."
-
-for CHECK in "worker1:/mnt/tampon/vault" "worker2:/mnt/tampon/postgres"; do
-  NODE="${CHECK%%:*}"
-  PATH_CHECK="${CHECK##*:}"
-  RESULT=$(kubectl debug node/"${NODE}" \
-    -it --image=busybox:1.35 \
-    --quiet -- \
-    sh -c "test -d /host${PATH_CHECK} && echo OK || echo MISSING" \
-    2>/dev/null || echo "SKIP")
-  if [[ "${RESULT}" == "MISSING" ]]; then
-    log_error "Path ${PATH_CHECK} does not exist on ${NODE}"
-  else
-    log_success "Path ${PATH_CHECK} on ${NODE}: OK"
-  fi
-done
 
 # =============================================================================
 # Step 1 — Namespaces
