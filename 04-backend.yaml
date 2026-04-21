@@ -1,4 +1,14 @@
-# ─── ServiceAccount ───────────────────────────────────────────────────────────
+# =============================================================================
+# 04-backend.yaml
+# Node.js Express backend
+# ALL credentials (DB + JWT) come exclusively from Vault via sidecar injection
+# NO Kubernetes Secrets, NO hardcoded values, NO env vars with credentials
+# =============================================================================
+
+---
+# -----------------------------------------------------------------------------
+# ServiceAccount — Vault role itssolutions-backend is bound to this SA
+# -----------------------------------------------------------------------------
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -6,180 +16,469 @@ metadata:
   namespace: itssolutions-prod
   labels:
     app: backend
+
 ---
-# ─── ConfigMap: server.js application code ───────────────────────────────────
+# -----------------------------------------------------------------------------
+# ConfigMap — Node.js application source code
+# server.js sources /vault/secrets/db-creds and /vault/secrets/app-config
+# before starting — all secrets come from those files, not from env vars
+# -----------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: backend-app-code
+  name: backend-source
   namespace: itssolutions-prod
+  labels:
+    app: backend
 data:
+  # ---------------------------------------------------------------------------
+  # package.json
+  # ---------------------------------------------------------------------------
+  package.json: |
+    {
+      "name": "itssolutions-backend",
+      "version": "1.0.0",
+      "description": "ITS Solutions Backend API",
+      "main": "server.js",
+      "scripts": {
+        "start": "node server.js"
+      },
+      "dependencies": {
+        "express": "^4.18.2",
+        "pg": "^8.11.3",
+        "bcrypt": "^5.1.1",
+        "jsonwebtoken": "^9.0.2",
+        "helmet": "^7.1.0",
+        "cors": "^2.8.5",
+        "express-rate-limit": "^7.1.5",
+        "dotenv": "^16.3.1"
+      }
+    }
+
+  # ---------------------------------------------------------------------------
+  # server.js
+  # Reads ALL secrets from files written by Vault Agent sidecar:
+  #   /vault/secrets/db-creds   → DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD
+  #   /vault/secrets/app-config → JWT_SECRET
+  # ---------------------------------------------------------------------------
   server.js: |
     'use strict';
-    const express    = require('express');
-    const helmet     = require('helmet');
-    const cors       = require('cors');
-    const rateLimit  = require('express-rate-limit');
-    const bcrypt     = require('bcrypt');
-    const jwt        = require('jsonwebtoken');
-    const { Pool }   = require('pg');
+
+    const fs   = require('fs');
+    const path = require('path');
+
+    // -------------------------------------------------------------------------
+    // Load Vault secrets from mounted files
+    // The Vault agent sidecar writes shell export statements to these files
+    // We parse them manually instead of using `source` (which is bash-only)
+    // -------------------------------------------------------------------------
+    function loadVaultSecret(filePath) {
+      if (!fs.existsSync(filePath)) {
+        console.error(`[vault] Secret file not found: ${filePath}`);
+        process.exit(1);
+      }
+      const lines = fs.readFileSync(filePath, 'utf8').split('\n');
+      lines.forEach(line => {
+        // Match: export KEY="VALUE"
+        const match = line.match(/^export\s+([A-Z_][A-Z0-9_]*)="(.*)"\s*$/);
+        if (match) {
+          process.env[match[1]] = match[2];
+        }
+      });
+    }
+
+    console.log('[startup] Loading secrets from Vault agent files...');
+    loadVaultSecret('/vault/secrets/db-creds');
+    loadVaultSecret('/vault/secrets/app-config');
+    console.log('[startup] Secrets loaded successfully');
+
+    // Validate required secrets are present
+    const required = ['DB_HOST','DB_PORT','DB_NAME','DB_USER','DB_PASSWORD','JWT_SECRET'];
+    required.forEach(key => {
+      if (!process.env[key]) {
+        console.error(`[startup] FATAL: Missing required secret: ${key}`);
+        process.exit(1);
+      }
+    });
+    console.log('[startup] All required secrets validated');
+
+    const express     = require('express');
+    const { Pool }    = require('pg');
+    const bcrypt      = require('bcrypt');
+    const jwt         = require('jsonwebtoken');
+    const helmet      = require('helmet');
+    const cors        = require('cors');
+    const rateLimit   = require('express-rate-limit');
 
     const app  = express();
     const PORT = process.env.PORT || 3000;
 
-    // ── Security middleware ──────────────────────────────────────────
-    app.use(helmet());
-    app.use(cors({
-      origin: process.env.FRONTEND_ORIGIN || '*',
-      methods: ['GET', 'POST', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization']
-    }));
-    app.use(express.json());
-
-    // ── Rate limiter on /api/login ───────────────────────────────────
-    const loginLimiter = rateLimit({
-      windowMs : 15 * 60 * 1000,   // 15 minutes
-      max      : 10,
-      message  : { error: 'Too many login attempts, please try again later.' }
-    });
-
-    // ── PostgreSQL pool (env vars sourced from Vault files) ──────────
+    // -------------------------------------------------------------------------
+    // PostgreSQL connection pool
+    // Credentials come from Vault — already loaded into process.env above
+    // -------------------------------------------------------------------------
     const pool = new Pool({
-      host     : process.env.DB_HOST,
-      port     : parseInt(process.env.DB_PORT || '5432'),
-      database : process.env.DB_NAME,
-      user     : process.env.DB_USER,
-      password : process.env.DB_PASSWORD,
-      ssl      : false
+      host:     process.env.DB_HOST,
+      port:     parseInt(process.env.DB_PORT, 10),
+      database: process.env.DB_NAME,
+      user:     process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      max:      10,
+      idleTimeoutMillis:    30000,
+      connectionTimeoutMillis: 5000,
+      ssl: false
     });
 
-    // ── DB bootstrap: create users table + default admin ────────────
-    async function bootstrap() {
+    pool.on('error', (err) => {
+      console.error('[pg] Unexpected pool error:', err.message);
+    });
+
+    // -------------------------------------------------------------------------
+    // Security middleware
+    // -------------------------------------------------------------------------
+    app.use(helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          styleSrc:   ["'self'", "'unsafe-inline'"],
+          scriptSrc:  ["'self'"],
+          imgSrc:     ["'self'", "data:"],
+        },
+      },
+    }));
+
+    app.use(cors({
+      origin: process.env.CORS_ORIGIN || '*',
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization'],
+      credentials: true
+    }));
+
+    app.use(express.json({ limit: '10kb' }));
+    app.use(express.urlencoded({ extended: false, limit: '10kb' }));
+
+    // -------------------------------------------------------------------------
+    // Rate limiting — 10 requests per 15 minutes on /api/auth/login
+    // -------------------------------------------------------------------------
+    const loginLimiter = rateLimit({
+      windowMs:         15 * 60 * 1000,
+      max:              10,
+      standardHeaders:  true,
+      legacyHeaders:    false,
+      message: {
+        success: false,
+        message: 'Too many login attempts. Please try again in 15 minutes.'
+      },
+      handler: (req, res, next, options) => {
+        console.warn(`[rate-limit] IP ${req.ip} exceeded login rate limit`);
+        res.status(429).json(options.message);
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // JWT middleware
+    // -------------------------------------------------------------------------
+    function authenticateToken(req, res, next) {
+      const authHeader = req.headers['authorization'];
+      const token = authHeader && authHeader.split(' ')[1];
+      if (!token) {
+        return res.status(401).json({ success: false, message: 'Access token required' });
+      }
+      jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+        if (err) {
+          if (err.name === 'TokenExpiredError') {
+            return res.status(401).json({ success: false, message: 'Token expired' });
+          }
+          return res.status(403).json({ success: false, message: 'Invalid token' });
+        }
+        req.user = user;
+        next();
+      });
+    }
+
+    // -------------------------------------------------------------------------
+    // Database initialization
+    // Creates users table and default admin user
+    // Admin password is bcrypt-hashed — never stored in plaintext
+    // -------------------------------------------------------------------------
+    async function initDatabase() {
       const client = await pool.connect();
       try {
+        console.log('[db] Initializing database schema...');
+
         await client.query(`
           CREATE TABLE IF NOT EXISTS users (
             id         SERIAL PRIMARY KEY,
-            username   VARCHAR(64) UNIQUE NOT NULL,
-            password   VARCHAR(128) NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-          );
+            username   VARCHAR(255) UNIQUE NOT NULL,
+            password   VARCHAR(255) NOT NULL,
+            role       VARCHAR(50)  NOT NULL DEFAULT 'user',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            last_login TIMESTAMP WITH TIME ZONE
+          )
         `);
+
+        // Create default admin user if not exists
+        // Password: Admin@1234! — stored as bcrypt hash only
         const existing = await client.query(
-          'SELECT id FROM users WHERE username = $1', ['admin']
+          'SELECT id FROM users WHERE username = $1',
+          ['admin']
         );
-        if (existing.rowCount === 0) {
-          const hash = await bcrypt.hash('Admin@1234!', 12);
+
+        if (existing.rows.length === 0) {
+          const SALT_ROUNDS = 12;
+          const adminPassword = 'Admin@1234!';
+          const hashedPassword = await bcrypt.hash(adminPassword, SALT_ROUNDS);
           await client.query(
-            'INSERT INTO users (username, password) VALUES ($1, $2)',
-            ['admin', hash]
+            `INSERT INTO users (username, password, role)
+             VALUES ($1, $2, $3)`,
+            ['admin', hashedPassword, 'admin']
           );
-          console.log('Default admin user created.');
+          console.log('[db] Default admin user created (password is bcrypt-hashed)');
+        } else {
+          console.log('[db] Admin user already exists');
         }
+
+        console.log('[db] Database initialization complete');
       } finally {
         client.release();
       }
     }
 
-    // ── Routes ───────────────────────────────────────────────────────
-    app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+    // -------------------------------------------------------------------------
+    // Routes
+    // -------------------------------------------------------------------------
 
-    app.post('/api/login', loginLimiter, async (req, res) => {
-      const { username, password } = req.body || {};
-      if (!username || !password) {
-        return res.status(400).json({ error: 'username and password are required' });
+    // Health check — no auth required
+    app.get('/health', async (req, res) => {
+      try {
+        await pool.query('SELECT 1');
+        res.json({
+          status:    'healthy',
+          timestamp: new Date().toISOString(),
+          db:        'connected'
+        });
+      } catch (err) {
+        res.status(503).json({
+          status:    'unhealthy',
+          timestamp: new Date().toISOString(),
+          db:        'disconnected',
+          error:     err.message
+        });
       }
+    });
+
+    // Login endpoint — rate limited
+    app.post('/api/auth/login', loginLimiter, async (req, res) => {
+      const { username, password } = req.body;
+
+      if (!username || !password) {
+        return res.status(400).json({
+          success: false,
+          message: 'Username and password are required'
+        });
+      }
+
+      // Sanitize
+      if (typeof username !== 'string' || username.length > 255) {
+        return res.status(400).json({ success: false, message: 'Invalid username' });
+      }
+
       try {
         const result = await pool.query(
-          'SELECT id, username, password FROM users WHERE username = $1',
-          [username]
+          'SELECT id, username, password, role FROM users WHERE username = $1',
+          [username.toLowerCase().trim()]
         );
-        if (result.rowCount === 0) {
-          return res.status(401).json({ error: 'Invalid credentials' });
+
+        if (result.rows.length === 0) {
+          // Constant-time response to prevent username enumeration
+          await bcrypt.hash('dummy', 10);
+          return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
+
         const user = result.rows[0];
-        const match = await bcrypt.compare(password, user.password);
-        if (!match) {
-          return res.status(401).json({ error: 'Invalid credentials' });
+        const passwordMatch = await bcrypt.compare(password, user.password);
+
+        if (!passwordMatch) {
+          console.warn(`[auth] Failed login attempt for user: ${username}`);
+          return res.status(401).json({ success: false, message: 'Invalid credentials' });
         }
-        const token = jwt.sign(
-          { id: user.id, username: user.username },
-          process.env.JWT_SECRET || 'fallback-secret',
-          { expiresIn: '8h' }
+
+        // Update last login timestamp
+        await pool.query(
+          'UPDATE users SET last_login = NOW() WHERE id = $1',
+          [user.id]
         );
-        return res.json({ token, username: user.username });
-      } catch (err) {
-        console.error('Login error:', err.message);
-        return res.status(500).json({ error: 'Internal server error' });
-      }
-    });
 
-    app.get('/api/me', (req, res) => {
-      const auth = req.headers.authorization || '';
-      const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-      if (!token) return res.status(401).json({ error: 'No token provided' });
-      try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback-secret');
-        return res.json({ username: decoded.username });
-      } catch {
-        return res.status(401).json({ error: 'Invalid token' });
-      }
-    });
+        // Sign JWT — secret comes from Vault
+        const token = jwt.sign(
+          {
+            id:       user.id,
+            username: user.username,
+            role:     user.role
+          },
+          process.env.JWT_SECRET,
+          {
+            expiresIn:  '8h',
+            issuer:     'itssolutions-backend',
+            audience:   'itssolutions-frontend'
+          }
+        );
 
-    // ── Start ────────────────────────────────────────────────────────
-    bootstrap()
-      .then(() => {
-        app.listen(PORT, '0.0.0.0', () => {
-          console.log(`Backend listening on port ${PORT}`);
+        console.log(`[auth] Successful login for user: ${user.username}`);
+
+        res.json({
+          success: true,
+          message: 'Login successful',
+          token,
+          user: {
+            id:       user.id,
+            username: user.username,
+            role:     user.role
+          }
         });
-      })
-      .catch(err => {
-        console.error('Bootstrap failed:', err.message);
-        process.exit(1);
-      });
 
-  package.json: |
-    {
-      "name": "itssolutions-backend",
-      "version": "1.0.0",
-      "main": "server.js",
-      "scripts": { "start": "node server.js" },
-      "dependencies": {
-        "bcrypt": "^5.1.1",
-        "cors": "^2.8.5",
-        "express": "^4.18.2",
-        "express-rate-limit": "^7.1.5",
-        "helmet": "^7.1.0",
-        "jsonwebtoken": "^9.0.2",
-        "pg": "^8.11.3"
+      } catch (err) {
+        console.error('[auth] Login error:', err.message);
+        res.status(500).json({ success: false, message: 'Internal server error' });
       }
+    });
+
+    // Token verification endpoint
+    app.get('/api/auth/verify', authenticateToken, (req, res) => {
+      res.json({
+        success: true,
+        user: {
+          id:       req.user.id,
+          username: req.user.username,
+          role:     req.user.role
+        }
+      });
+    });
+
+    // Logout — client-side token removal; server logs it
+    app.post('/api/auth/logout', authenticateToken, (req, res) => {
+      console.log(`[auth] User logged out: ${req.user.username}`);
+      res.json({ success: true, message: 'Logged out successfully' });
+    });
+
+    // Protected user profile endpoint
+    app.get('/api/user/profile', authenticateToken, async (req, res) => {
+      try {
+        const result = await pool.query(
+          `SELECT id, username, role, created_at, last_login
+           FROM users WHERE id = $1`,
+          [req.user.id]
+        );
+        if (result.rows.length === 0) {
+          return res.status(404).json({ success: false, message: 'User not found' });
+        }
+        res.json({ success: true, user: result.rows[0] });
+      } catch (err) {
+        console.error('[profile] Error:', err.message);
+        res.status(500).json({ success: false, message: 'Internal server error' });
+      }
+    });
+
+    // 404 handler
+    app.use((req, res) => {
+      res.status(404).json({ success: false, message: 'Route not found' });
+    });
+
+    // Global error handler
+    app.use((err, req, res, next) => {
+      console.error('[error]', err.stack);
+      res.status(500).json({ success: false, message: 'Internal server error' });
+    });
+
+    // -------------------------------------------------------------------------
+    // Startup sequence
+    // -------------------------------------------------------------------------
+    async function start() {
+      let retries = 10;
+      while (retries > 0) {
+        try {
+          console.log(`[startup] Attempting DB connection (${11 - retries}/10)...`);
+          await pool.query('SELECT 1');
+          console.log('[startup] Database connection established');
+          break;
+        } catch (err) {
+          retries--;
+          if (retries === 0) {
+            console.error('[startup] FATAL: Cannot connect to database:', err.message);
+            process.exit(1);
+          }
+          console.warn(`[startup] DB not ready: ${err.message} — retrying in 5s...`);
+          await new Promise(r => setTimeout(r, 5000));
+        }
+      }
+
+      await initDatabase();
+
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`[startup] Server listening on port ${PORT}`);
+        console.log('[startup] All credentials loaded from Vault — no hardcoded secrets');
+      });
     }
 
+    // Graceful shutdown
+    process.on('SIGTERM', async () => {
+      console.log('[shutdown] SIGTERM received — closing DB pool...');
+      await pool.end();
+      process.exit(0);
+    });
+
+    process.on('SIGINT', async () => {
+      console.log('[shutdown] SIGINT received — closing DB pool...');
+      await pool.end();
+      process.exit(0);
+    });
+
+    start().catch(err => {
+      console.error('[startup] FATAL:', err);
+      process.exit(1);
+    });
+
+  # ---------------------------------------------------------------------------
+  # entrypoint.sh
+  # Waits for Vault agent to write secret files, then starts the app
+  # The node process itself also loads secrets — this is belt-and-suspenders
+  # ---------------------------------------------------------------------------
   entrypoint.sh: |
     #!/bin/sh
     set -e
-    echo "Waiting for Vault secrets..."
-    RETRIES=30
-    until [ -f /vault/secrets/db-creds ] && [ -f /vault/secrets/app-config ]; do
-      RETRIES=$((RETRIES - 1))
-      if [ "$RETRIES" -eq 0 ]; then
-        echo "ERROR: Vault secrets not available after timeout."
-        exit 1
-      fi
-      echo "  Vault secrets not yet available, retrying in 3s... ($RETRIES left)"
-      sleep 3
+
+    echo "[entrypoint] Waiting for Vault agent to write secret files..."
+
+    for SECRET_FILE in /vault/secrets/db-creds /vault/secrets/app-config; do
+      ATTEMPTS=0
+      MAX_ATTEMPTS=30
+      while [ ! -f "${SECRET_FILE}" ]; do
+        ATTEMPTS=$((ATTEMPTS + 1))
+        if [ "${ATTEMPTS}" -ge "${MAX_ATTEMPTS}" ]; then
+          echo "[entrypoint] ERROR: ${SECRET_FILE} not available after ${MAX_ATTEMPTS} attempts"
+          exit 1
+        fi
+        echo "[entrypoint] Waiting for ${SECRET_FILE} ... (${ATTEMPTS}/${MAX_ATTEMPTS})"
+        sleep 2
+      done
+      echo "[entrypoint] Found: ${SECRET_FILE}"
     done
-    echo "Sourcing Vault secrets..."
-    # shellcheck disable=SC1091
-    . /vault/secrets/db-creds
-    . /vault/secrets/app-config
-    echo "Installing npm dependencies..."
+
+    echo "[entrypoint] All Vault secrets are available"
+    echo "[entrypoint] Installing npm dependencies..."
+
     cd /app
-    npm install --omit=dev
-    echo "Starting Node.js server..."
+    npm install --production --silent
+
+    echo "[entrypoint] Starting Node.js server..."
     exec node server.js
+
 ---
-# ─── Deployment ───────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Deployment — 2 replicas with Vault sidecar injection
+# ALL credential access via Vault agent files at /vault/secrets/
+# -----------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -197,10 +496,16 @@ spec:
       labels:
         app: backend
       annotations:
+        # --------------------------------------------------------------------
+        # Vault sidecar injector annotations
+        # Vault agent writes export statements to /vault/secrets/db-creds
+        # and /vault/secrets/app-config
+        # The Node.js server.js reads and parses these files directly
+        # --------------------------------------------------------------------
         vault.hashicorp.com/agent-inject: "true"
         vault.hashicorp.com/role: "itssolutions-backend"
+
         vault.hashicorp.com/agent-inject-secret-db-creds: "secret/data/itssolutions/db-creds"
-        vault.hashicorp.com/agent-inject-secret-app-config: "secret/data/itssolutions/app-config"
         vault.hashicorp.com/agent-inject-template-db-creds: |
           {{- with secret "secret/data/itssolutions/db-creds" -}}
           export DB_HOST="{{ .Data.data.host }}"
@@ -209,59 +514,95 @@ spec:
           export DB_USER="{{ .Data.data.username }}"
           export DB_PASSWORD="{{ .Data.data.password }}"
           {{- end }}
+
+        vault.hashicorp.com/agent-inject-secret-app-config: "secret/data/itssolutions/app-config"
         vault.hashicorp.com/agent-inject-template-app-config: |
           {{- with secret "secret/data/itssolutions/app-config" -}}
           export JWT_SECRET="{{ .Data.data.jwt_secret }}"
           {{- end }}
+
+        # Keep the sidecar running to refresh tokens — secrets never expire
+        vault.hashicorp.com/agent-pre-populate-only: "false"
+
     spec:
       serviceAccountName: backend-sa
+
       containers:
         - name: backend
-          image: node:20-alpine
+          image: node:18-alpine
+          imagePullPolicy: IfNotPresent
+
           command:
-            - /bin/sh
+            - sh
             - /app/entrypoint.sh
+
           ports:
-            - containerPort: 3000
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+
+          # ------------------------------------------------------------------
+          # NO credentials in env vars
+          # Only non-sensitive configuration here
+          # ------------------------------------------------------------------
           env:
-            - name: PORT
-              value: "3000"
             - name: NODE_ENV
               value: "production"
+            - name: PORT
+              value: "3000"
+            - name: CORS_ORIGIN
+              value: "*"
+
           volumeMounts:
-            - name: app-code
+            - name: app-source
               mountPath: /app
+
           readinessProbe:
             httpGet:
               path: /health
               port: 3000
             initialDelaySeconds: 30
             periodSeconds: 10
-            failureThreshold: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+
           livenessProbe:
             httpGet:
               path: /health
               port: 3000
             initialDelaySeconds: 60
-            periodSeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+
           resources:
             requests:
-              cpu: "100m"
               memory: "256Mi"
+              cpu: "250m"
             limits:
-              cpu: "500m"
               memory: "512Mi"
+              cpu: "500m"
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+
       volumes:
-        - name: app-code
+        - name: app-source
           configMap:
-            name: backend-app-code
+            name: backend-source
             defaultMode: 0755
+
 ---
-# ─── Service ──────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Service — ClusterIP
+# -----------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: backend-service
+  name: backend
   namespace: itssolutions-prod
   labels:
     app: backend

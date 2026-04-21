@@ -1,12 +1,24 @@
-# ─── ConfigMap: Nginx config + React SPA ─────────────────────────────────────
+# =============================================================================
+# 05-frontend.yaml
+# React/Nginx frontend
+# Serves the SPA and proxies /api/ requests to the backend
+# No credentials needed — this tier has no database access
+# =============================================================================
+
+---
+# -----------------------------------------------------------------------------
+# ConfigMap — Nginx configuration
+# -----------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: frontend-config
+  name: nginx-config
   namespace: itssolutions-prod
+  labels:
+    app: frontend
 data:
   nginx.conf: |
-    worker_processes auto;
+    worker_processes  auto;
     error_log  /var/log/nginx/error.log warn;
     pid        /tmp/nginx.pid;
 
@@ -17,340 +29,111 @@ data:
     http {
       include       /etc/nginx/mime.types;
       default_type  application/octet-stream;
-      sendfile      on;
+
+      # Logging
+      log_format main '$remote_addr -  $ remote_user [ $ time_local] '
+                      '"$request" $status  $ body_bytes_sent '
+                      '" $ http_referer" "$http_user_agent"';
+      access_log /var/log/nginx/access.log main;
+
+      sendfile        on;
+      tcp_nopush      on;
+      tcp_nodelay     on;
       keepalive_timeout 65;
+      gzip            on;
+      gzip_types      text/plain text/css application/json
+                      application/javascript text/xml application/xml
+                      application/xml+rss text/javascript;
 
       # Security headers
-      add_header X-Frame-Options           "SAMEORIGIN"            always;
-      add_header X-Content-Type-Options    "nosniff"               always;
-      add_header X-XSS-Protection         "1; mode=block"         always;
-      add_header Referrer-Policy          "strict-origin-when-cross-origin" always;
-      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+      add_header X-Frame-Options           "SAMEORIGIN"        always;
+      add_header X-Content-Type-Options    "nosniff"           always;
+      add_header X-XSS-Protection          "1; mode=block"     always;
+      add_header Referrer-Policy           "strict-origin"     always;
+      add_header Permissions-Policy        "geolocation=()"    always;
+      add_header Strict-Transport-Security "max-age=31536000"  always;
 
       server {
-        listen 8080;
-        server_name _;
-        root /usr/share/nginx/html;
-        index index.html;
+        listen       8080;
+        server_name  _;
+        root         /usr/share/nginx/html;
+        index        index.html;
 
-        # Backend API proxy
+        # Proxy /api/ to backend service
         location /api/ {
-          proxy_pass         http://backend-service.itssolutions-prod.svc.cluster.local:3000;
+          proxy_pass         http://backend.itssolutions-prod.svc.cluster.local:3000;
           proxy_http_version 1.1;
           proxy_set_header   Host              $host;
           proxy_set_header   X-Real-IP         $remote_addr;
           proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
           proxy_set_header   X-Forwarded-Proto $scheme;
-          proxy_read_timeout 30s;
+          proxy_connect_timeout 10s;
+          proxy_read_timeout    60s;
         }
 
-        # SPA fallback
+        # Health check for backend via nginx
+        location /health {
+          proxy_pass http://backend.itssolutions-prod.svc.cluster.local:3000/health;
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+        }
+
+        # SPA fallback — all routes served by index.html
         location / {
           try_files $uri $uri/ /index.html;
+        }
+
+        # Deny dot files
+        location ~ /\. {
+          deny all;
         }
       }
     }
 
+---
+# -----------------------------------------------------------------------------
+# ConfigMap — Frontend SPA (single index.html)
+# Full React-style login app with JWT authentication
+# Communicates with backend via /api/ (proxied by nginx)
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-html
+  namespace: itssolutions-prod
+  labels:
+    app: frontend
+data:
   index.html: |
     <!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>ITSSolutions – Login</title>
+      <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+      <title>ITS Solutions — Login</title>
       <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+          --primary:      #2563eb;
+          --primary-dark: #1d4ed8;
+          --danger:       #dc2626;
+          --success:      #16a34a;
+          --bg:           #f1f5f9;
+          --surface:      #ffffff;
+          --text:         #1e293b;
+          --muted:        #64748b;
+          --border:       #e2e8f0;
+          --radius:       0.5rem;
+          --shadow:       0 4px 24px rgba(0,0,0,0.10);
+        }
+
         body {
-          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-          background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+                       'Helvetica Neue', Arial, sans-serif;
+          background: var(--bg);
+          color: var(--text);
           min-height: 100vh;
           display: flex;
           align-items: center;
-          justify-content: center;
-        }
-        .container {
-          background: rgba(255,255,255,0.05);
-          backdrop-filter: blur(10px);
-          border: 1px solid rgba(255,255,255,0.1);
-          border-radius: 16px;
-          padding: 48px 40px;
-          width: 100%;
-          max-width: 400px;
-          box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-        }
-        .logo {
-          text-align: center;
-          margin-bottom: 32px;
-        }
-        .logo h1 {
-          color: #e94560;
-          font-size: 2rem;
-          letter-spacing: 2px;
-        }
-        .logo p {
-          color: rgba(255,255,255,0.5);
-          font-size: 0.85rem;
-          margin-top: 4px;
-        }
-        label {
-          display: block;
-          color: rgba(255,255,255,0.7);
-          font-size: 0.85rem;
-          margin-bottom: 6px;
-          margin-top: 20px;
-          text-transform: uppercase;
-          letter-spacing: 1px;
-        }
-        input {
-          width: 100%;
-          padding: 12px 16px;
-          border-radius: 8px;
-          border: 1px solid rgba(255,255,255,0.15);
-          background: rgba(255,255,255,0.07);
-          color: #fff;
-          font-size: 1rem;
-          outline: none;
-          transition: border-color 0.2s;
-        }
-        input:focus { border-color: #e94560; }
-        button {
-          width: 100%;
-          margin-top: 28px;
-          padding: 14px;
-          border: none;
-          border-radius: 8px;
-          background: linear-gradient(90deg, #e94560, #c23152);
-          color: #fff;
-          font-size: 1rem;
-          font-weight: 600;
-          letter-spacing: 1px;
-          cursor: pointer;
-          transition: opacity 0.2s;
-        }
-        button:hover { opacity: 0.85; }
-        button:disabled { opacity: 0.5; cursor: not-allowed; }
-        .message {
-          margin-top: 16px;
-          text-align: center;
-          font-size: 0.9rem;
-          min-height: 22px;
-        }
-        .message.error   { color: #ff6b6b; }
-        .message.success { color: #6bffb8; }
-        #dashboard {
-          display: none;
-          text-align: center;
-        }
-        #dashboard h2 { color: #6bffb8; font-size: 1.5rem; margin-bottom: 12px; }
-        #dashboard p  { color: rgba(255,255,255,0.7); }
-        #logoutBtn {
-          background: linear-gradient(90deg, #333, #555);
-          margin-top: 24px;
-          max-width: 160px;
-          margin-left: auto;
-          margin-right: auto;
-          display: block;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="logo">
-          <h1>ITS<span style="color:#fff">Solutions</span></h1>
-          <p>Secure Administration Portal</p>
-        </div>
-
-        <!-- Login form -->
-        <div id="loginSection">
-          <form id="loginForm" novalidate>
-            <label for="username">Username</label>
-            <input type="text" id="username" name="username" autocomplete="username"
-                   placeholder="Enter your username" required />
-            <label for="password">Password</label>
-            <input type="password" id="password" name="password" autocomplete="current-password"
-                   placeholder="Enter your password" required />
-            <button type="submit" id="loginBtn">Sign In</button>
-          </form>
-          <div class="message" id="message"></div>
-        </div>
-
-        <!-- Dashboard (after login) -->
-        <div id="dashboard">
-          <h2>&#10003; Authenticated</h2>
-          <p>Welcome, <strong id="welcomeUser"></strong>!</p>
-          <p style="margin-top:8px;font-size:0.82rem;color:rgba(255,255,255,0.4)">
-            JWT token stored in session storage.
-          </p>
-          <button id="logoutBtn">Logout</button>
-        </div>
-      </div>
-
-      <script>
-        const loginSection = document.getElementById('loginSection');
-        const dashboard    = document.getElementById('dashboard');
-        const msgEl        = document.getElementById('message');
-        const loginBtn     = document.getElementById('loginBtn');
-
-        function showDashboard(username) {
-          loginSection.style.display = 'none';
-          dashboard.style.display    = 'block';
-          document.getElementById('welcomeUser').textContent = username;
-        }
-
-        // Check existing token on page load
-        (async function() {
-          const token = sessionStorage.getItem('jwt');
-          if (!token) return;
-          try {
-            const res  = await fetch('/api/me', {
-              headers: { Authorization: 'Bearer ' + token }
-            });
-            if (res.ok) {
-              const data = await res.json();
-              showDashboard(data.username);
-            } else {
-              sessionStorage.removeItem('jwt');
-            }
-          } catch (_) {}
-        })();
-
-        document.getElementById('loginForm').addEventListener('submit', async (e) => {
-          e.preventDefault();
-          msgEl.className = 'message';
-          msgEl.textContent = '';
-          loginBtn.disabled = true;
-          loginBtn.textContent = 'Signing in...';
-
-          const username = document.getElementById('username').value.trim();
-          const password = document.getElementById('password').value;
-
-          if (!username || !password) {
-            msgEl.className = 'message error';
-            msgEl.textContent = 'Please fill in both fields.';
-            loginBtn.disabled = false;
-            loginBtn.textContent = 'Sign In';
-            return;
-          }
-
-          try {
-            const res = await fetch('/api/login', {
-              method : 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body   : JSON.stringify({ username, password })
-            });
-            const data = await res.json();
-            if (res.ok) {
-              sessionStorage.setItem('jwt', data.token);
-              msgEl.className   = 'message success';
-              msgEl.textContent = 'Login successful!';
-              setTimeout(() => showDashboard(data.username), 600);
-            } else {
-              msgEl.className   = 'message error';
-              msgEl.textContent = data.error || 'Login failed.';
-            }
-          } catch (err) {
-            msgEl.className   = 'message error';
-            msgEl.textContent = 'Network error – please try again.';
-          } finally {
-            loginBtn.disabled = false;
-            loginBtn.textContent = 'Sign In';
-          }
-        });
-
-        document.getElementById('logoutBtn').addEventListener('click', () => {
-          sessionStorage.removeItem('jwt');
-          dashboard.style.display    = 'none';
-          loginSection.style.display = 'block';
-          document.getElementById('username').value = '';
-          document.getElementById('password').value = '';
-        });
-      </script>
-    </body>
-    </html>
----
-# ─── Deployment ───────────────────────────────────────────────────────────────
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: frontend
-  namespace: itssolutions-prod
-  labels:
-    app: frontend
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: frontend
-  template:
-    metadata:
-      labels:
-        app: frontend
-    spec:
-      containers:
-        - name: frontend
-          image: nginx:1.25-alpine
-          command:
-            - nginx
-            - -c
-            - /etc/nginx/nginx.conf
-            - -g
-            - "daemon off;"
-          ports:
-            - containerPort: 8080
-          volumeMounts:
-            - name: nginx-config
-              mountPath: /etc/nginx/nginx.conf
-              subPath: nginx.conf
-            - name: html-content
-              mountPath: /usr/share/nginx/html/index.html
-              subPath: index.html
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 8080
-            initialDelaySeconds: 10
-            periodSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 8080
-            initialDelaySeconds: 20
-            periodSeconds: 10
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "200m"
-              memory: "128Mi"
-      volumes:
-        - name: nginx-config
-          configMap:
-            name: frontend-config
-            items:
-              - key: nginx.conf
-                path: nginx.conf
-        - name: html-content
-          configMap:
-            name: frontend-config
-            items:
-              - key: index.html
-                path: index.html
----
-# ─── Service ──────────────────────────────────────────────────────────────────
-apiVersion: v1
-kind: Service
-metadata:
-  name: frontend-service
-  namespace: itssolutions-prod
-  labels:
-    app: frontend
-spec:
-  type: ClusterIP
-  selector:
-    app: frontend
-  ports:
-    - name: http
-      port: 8080
-      targetPort: 8080
-      protocol: TCP

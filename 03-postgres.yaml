@@ -1,17 +1,141 @@
-# ─── PersistentVolumeClaim ────────────────────────────────────────────────────
+# =============================================================================
+# 03-postgres.yaml
+# PostgreSQL deployment where ALL credentials come from Vault
+#
+# Flow:
+#   1. ServiceAccount postgres-init-sa has Vault role itssolutions-db-init
+#   2. A one-time Job (postgres-bootstrap) runs with Vault sidecar injection
+#      to retrieve credentials and initialize the database
+#   3. The main PostgreSQL Deployment reads its password from Vault via
+#      a Vault Agent init container that writes to an emptyDir
+#   4. NO credentials exist in any Kubernetes Secret, ConfigMap or env var
+# =============================================================================
+
+---
+# -----------------------------------------------------------------------------
+# ServiceAccount for the postgres bootstrap Job
+# Vault role itssolutions-db-init is bound to this SA
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres-init-sa
+  namespace: itssolutions-db
+  labels:
+    app: postgres
+
+---
+# -----------------------------------------------------------------------------
+# ServiceAccount for the PostgreSQL Deployment itself
+# Vault role itssolutions-db-init is also bound to this SA
+# so the main pod can read its own password from Vault
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres-sa
+  namespace: itssolutions-db
+  labels:
+    app: postgres
+
+---
+# -----------------------------------------------------------------------------
+# PersistentVolumeClaim — binds to postgres-pv
+# -----------------------------------------------------------------------------
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: postgres-pvc
   namespace: itssolutions-db
+  labels:
+    app: postgres
 spec:
+  storageClassName: local-storage
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
       storage: 5Gi
+
 ---
-# ─── Deployment ───────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# ConfigMap — PostgreSQL init SQL template
+# Uses shell variable substitution — variables are set from Vault secrets
+# at runtime inside the bootstrap Job
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-sql
+  namespace: itssolutions-db
+  labels:
+    app: postgres
+data:
+  # This script is called from the bootstrap Job entrypoint
+  # It receives DB credentials via sourced Vault secrets (environment vars)
+  init.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    echo "[init] Waiting for PostgreSQL to be ready..."
+    for i in $(seq 1 30); do
+      pg_isready -h 127.0.0.1 -p 5432 -U "${ADMIN_USER}" && break
+      echo "[init] Attempt ${i}/30 — not ready yet..."
+      sleep 3
+    done
+
+    echo "[init] Creating application user and database..."
+    psql -h 127.0.0.1 -p 5432 -U "${ADMIN_USER}" -d postgres <<-EOSQL
+      -- Create application user if not exists
+      DO \$\$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT FROM pg_catalog.pg_roles WHERE rolname = '${APP_USER}'
+        ) THEN
+          CREATE USER ${APP_USER} WITH PASSWORD '${APP_PASSWORD}';
+          RAISE NOTICE 'User ${APP_USER} created';
+        ELSE
+          -- Update password in case it was rotated in Vault
+          ALTER USER ${APP_USER} WITH PASSWORD '${APP_PASSWORD}';
+          RAISE NOTICE 'User ${APP_USER} password updated';
+        END IF;
+      END
+      \$\$;
+
+      -- Create database if not exists
+      SELECT 'CREATE DATABASE ${APP_DATABASE} OWNER ${APP_USER}'
+      WHERE NOT EXISTS (
+        SELECT FROM pg_database WHERE datname = '${APP_DATABASE}'
+      )\gexec
+
+      -- Grant full privileges
+      GRANT ALL PRIVILEGES ON DATABASE ${APP_DATABASE} TO ${APP_USER};
+    EOSQL
+
+    echo "[init] Connecting to app database and granting schema privileges..."
+    psql -h 127.0.0.1 -p 5432 -U "${ADMIN_USER}" -d "${APP_DATABASE}" <<-EOSQL
+      GRANT ALL ON SCHEMA public TO ${APP_USER};
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT ALL ON TABLES TO ${APP_USER};
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT ALL ON SEQUENCES TO ${APP_USER};
+    EOSQL
+
+    echo "[init] Database initialization complete"
+
+---
+# -----------------------------------------------------------------------------
+# PostgreSQL Deployment
+#
+# The pod has TWO init containers:
+#   1. fix-permissions  — chown /var/lib/postgresql/data to 999:999
+#   2. vault-agent-init — Vault Agent (injected automatically by the sidecar
+#                         mutating webhook because of annotations below)
+#                         writes /vault/secrets/db-init with env vars
+#
+# The main container sources /vault/secrets/db-init to get POSTGRES_PASSWORD
+# via an entrypoint wrapper — no password in env, no password in ConfigMap
+# -----------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,95 +143,178 @@ metadata:
   namespace: itssolutions-db
   labels:
     app: postgres
+    version: "15"
+  annotations:
+    # ------------------------------------------------------------------
+    # Vault sidecar injector annotations
+    # The sidecar reads db-init secret so postgres can set its own password
+    # ------------------------------------------------------------------
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/role: "itssolutions-db-init"
+    vault.hashicorp.com/agent-inject-secret-db-init: "secret/data/itssolutions/db-init"
+    vault.hashicorp.com/agent-inject-template-db-init: |
+      {{- with secret "secret/data/itssolutions/db-init" -}}
+      export POSTGRES_PASSWORD="{{ .Data.data.admin_password }}"
+      export POSTGRES_USER="{{ .Data.data.admin_user }}"
+      export POSTGRES_DB="{{ .Data.data.app_database }}"
+      export PGDATA="/var/lib/postgresql/data/pgdata"
+      {{- end }}
+    # Run agent as init container only — no sidecar needed after startup
+    vault.hashicorp.com/agent-pre-populate-only: "true"
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: postgres
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         app: postgres
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "itssolutions-db-init"
+        vault.hashicorp.com/agent-inject-secret-db-init: "secret/data/itssolutions/db-init"
+        vault.hashicorp.com/agent-inject-template-db-init: |
+          {{- with secret "secret/data/itssolutions/db-init" -}}
+          export POSTGRES_PASSWORD="{{ .Data.data.admin_password }}"
+          export POSTGRES_USER="{{ .Data.data.admin_user }}"
+          export POSTGRES_DB="{{ .Data.data.app_database }}"
+          export PGDATA="/var/lib/postgresql/data/pgdata"
+          {{- end }}
+        vault.hashicorp.com/agent-pre-populate-only: "true"
     spec:
+      serviceAccountName: postgres-sa
+
       securityContext:
         fsGroup: 999
         runAsUser: 999
         runAsGroup: 999
+
       initContainers:
+        # ----------------------------------------------------------------
+        # Init 1: Fix permissions on the data directory
+        # Runs as root just for chown — Vault agent init runs after this
+        # ----------------------------------------------------------------
         - name: fix-permissions
           image: busybox:1.36
           command:
             - sh
             - -c
             - |
+              echo "[fix-permissions] Fixing ownership of /var/lib/postgresql/data"
               chown -R 999:999 /var/lib/postgresql/data
               chmod 700 /var/lib/postgresql/data
+              echo "[fix-permissions] Done"
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
-            allowPrivilegeEscalation: true
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+        # Note: vault-agent-init container is automatically injected
+        # by the Vault mutating webhook AFTER fix-permissions
+
       containers:
         - name: postgres
           image: postgres:15-alpine
+          imagePullPolicy: IfNotPresent
+
+          # ----------------------------------------------------------------
+          # Entrypoint sources the Vault secret file to get env vars
+          # then launches the real postgres entrypoint
+          # NO password is hardcoded anywhere
+          # ----------------------------------------------------------------
+          command:
+            - sh
+            - -c
+            - |
+              echo "[postgres] Sourcing Vault secrets..."
+              # Wait for Vault agent to write the secrets file
+              for i in $(seq 1 30); do
+                [ -f /vault/secrets/db-init ] && break
+                echo "[postgres] Waiting for /vault/secrets/db-init ... (${i}/30)"
+                sleep 2
+              done
+              [ -f /vault/secrets/db-init ] || {
+                echo "[postgres] ERROR: /vault/secrets/db-init not found after 60s"
+                exit 1
+              }
+              source /vault/secrets/db-init
+              echo "[postgres] Secrets loaded — starting PostgreSQL..."
+              exec docker-entrypoint.sh postgres
+
           ports:
-            - containerPort: 5432
-          securityContext:
-            runAsUser: 999
-            runAsGroup: 999
-            allowPrivilegeEscalation: false
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+
+          # ----------------------------------------------------------------
+          # NO credentials in env vars
+          # Only non-sensitive config here
+          # ----------------------------------------------------------------
           env:
-            - name: POSTGRES_USER
-              value: "itssolutions"
-            - name: POSTGRES_PASSWORD
-              value: "SecurePass123!"
-            - name: POSTGRES_DB
-              value: "itssolutions_db"
             - name: PGDATA
               value: "/var/lib/postgresql/data/pgdata"
+
           volumeMounts:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
+
           readinessProbe:
             exec:
               command:
-                - pg_isready
-                - -U
-                - itssolutions
-                - -d
-                - itssolutions_db
-            initialDelaySeconds: 10
-            periodSeconds: 5
-            failureThreshold: 12
+                - sh
+                - -c
+                - |
+                  source /vault/secrets/db-init 2>/dev/null || true
+                  pg_isready -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-postgres}"
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+
           livenessProbe:
             exec:
               command:
-                - pg_isready
-                - -U
-                - itssolutions
-                - -d
-                - itssolutions_db
-            initialDelaySeconds: 30
-            periodSeconds: 10
+                - sh
+                - -c
+                - |
+                  source /vault/secrets/db-init 2>/dev/null || true
+                  pg_isready -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-postgres}"
+            initialDelaySeconds: 40
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+
           resources:
             requests:
-              cpu: "100m"
               memory: "256Mi"
+              cpu: "250m"
             limits:
-              cpu: "500m"
               memory: "512Mi"
+              cpu: "500m"
+
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+
       volumes:
         - name: postgres-data
           persistentVolumeClaim:
             claimName: postgres-pvc
+
 ---
-# ─── Service (ClusterIP, NOT headless) ────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Service — ClusterIP (NOT headless)
+# -----------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
-  name: postgres-service
+  name: postgres
   namespace: itssolutions-db
   labels:
     app: postgres
@@ -116,7 +323,134 @@ spec:
   selector:
     app: postgres
   ports:
-    - name: postgresql
+    - name: postgres
       port: 5432
       targetPort: 5432
       protocol: TCP
+
+---
+# -----------------------------------------------------------------------------
+# Bootstrap Job
+# Runs ONCE after PostgreSQL is up to create the app user and database
+# Credentials come entirely from Vault via sidecar injection
+# -----------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-bootstrap
+  namespace: itssolutions-db
+  labels:
+    app: postgres-bootstrap
+  annotations:
+    vault.hashicorp.com/agent-inject: "true"
+    vault.hashicorp.com/role: "itssolutions-db-init"
+    vault.hashicorp.com/agent-inject-secret-db-init: "secret/data/itssolutions/db-init"
+    vault.hashicorp.com/agent-inject-template-db-init: |
+      {{- with secret "secret/data/itssolutions/db-init" -}}
+      export ADMIN_USER="{{ .Data.data.admin_user }}"
+      export ADMIN_PASSWORD="{{ .Data.data.admin_password }}"
+      export APP_USER="{{ .Data.data.app_user }}"
+      export APP_PASSWORD="{{ .Data.data.app_password }}"
+      export APP_DATABASE="{{ .Data.data.app_database }}"
+      {{- end }}
+    vault.hashicorp.com/agent-pre-populate-only: "true"
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        app: postgres-bootstrap
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "itssolutions-db-init"
+        vault.hashicorp.com/agent-inject-secret-db-init: "secret/data/itssolutions/db-init"
+        vault.hashicorp.com/agent-inject-template-db-init: |
+          {{- with secret "secret/data/itssolutions/db-init" -}}
+          export ADMIN_USER="{{ .Data.data.admin_user }}"
+          export ADMIN_PASSWORD="{{ .Data.data.admin_password }}"
+          export APP_USER="{{ .Data.data.app_user }}"
+          export APP_PASSWORD="{{ .Data.data.app_password }}"
+          export APP_DATABASE="{{ .Data.data.app_database }}"
+          {{- end }}
+        vault.hashicorp.com/agent-pre-populate-only: "true"
+    spec:
+      serviceAccountName: postgres-init-sa
+      restartPolicy: OnFailure
+
+      containers:
+        - name: bootstrap
+          image: postgres:15-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              echo "[bootstrap] Sourcing Vault secrets..."
+              for i in $(seq 1 30); do
+                [ -f /vault/secrets/db-init ] && break
+                echo "[bootstrap] Waiting for /vault/secrets/db-init ... (${i}/30)"
+                sleep 2
+              done
+              [ -f /vault/secrets/db-init ] || {
+                echo "[bootstrap] ERROR: Vault secrets not available"
+                exit 1
+              }
+              source /vault/secrets/db-init
+
+              echo "[bootstrap] Waiting for PostgreSQL to be ready..."
+              for i in $(seq 1 40); do
+                PGPASSWORD="${ADMIN_PASSWORD}" pg_isready \
+                  -h postgres.itssolutions-db.svc.cluster.local \
+                  -p 5432 \
+                  -U "${ADMIN_USER}" && break
+                echo "[bootstrap] Attempt ${i}/40 — PostgreSQL not ready..."
+                sleep 5
+              done
+
+              echo "[bootstrap] Creating user and database..."
+              PGPASSWORD="${ADMIN_PASSWORD}" psql \
+                -h postgres.itssolutions-db.svc.cluster.local \
+                -p 5432 \
+                -U "${ADMIN_USER}" \
+                -d postgres <<-EOSQL
+                DO \$\$
+                BEGIN
+                  IF NOT EXISTS (
+                    SELECT FROM pg_catalog.pg_roles WHERE rolname = '${APP_USER}'
+                  ) THEN
+                    CREATE USER ${APP_USER} WITH PASSWORD '${APP_PASSWORD}';
+                    RAISE NOTICE 'Created user ${APP_USER}';
+                  ELSE
+                    ALTER USER ${APP_USER} WITH PASSWORD '${APP_PASSWORD}';
+                    RAISE NOTICE 'Updated password for ${APP_USER}';
+                  END IF;
+                END
+                \$\$;
+
+                SELECT 'CREATE DATABASE ${APP_DATABASE} OWNER ${APP_USER}'
+                WHERE NOT EXISTS (
+                  SELECT FROM pg_database WHERE datname = '${APP_DATABASE}'
+                )\gexec
+
+                GRANT ALL PRIVILEGES ON DATABASE ${APP_DATABASE} TO ${APP_USER};
+              EOSQL
+
+              PGPASSWORD="${ADMIN_PASSWORD}" psql \
+                -h postgres.itssolutions-db.svc.cluster.local \
+                -p 5432 \
+                -U "${ADMIN_USER}" \
+                -d "${APP_DATABASE}" <<-EOSQL
+                GRANT ALL ON SCHEMA public TO ${APP_USER};
+                ALTER DEFAULT PRIVILEGES IN SCHEMA public
+                  GRANT ALL ON TABLES TO ${APP_USER};
+                ALTER DEFAULT PRIVILEGES IN SCHEMA public
+                  GRANT ALL ON SEQUENCES TO ${APP_USER};
+              EOSQL
+
+              echo "[bootstrap] Bootstrap complete"
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            allowPrivilegeEscalation: false
