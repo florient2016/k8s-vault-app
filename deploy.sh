@@ -56,74 +56,74 @@ POSTGRES_NODE="${NODES[$(( NODE_COUNT > 1 ? 1 : 0 ))]}"
 log_info "Vault PV    → node: ${VAULT_NODE}"
 log_info "Postgres PV → node: ${POSTGRES_NODE}"
 
-# =============================================================================
-# STEP 1 — Create host directories on nodes
-# =============================================================================
-log_step "STEP 1: Preparing host directories via privileged DaemonSet"
+# # =============================================================================
+# # STEP 1 — Create host directories on nodes
+# # =============================================================================
+# log_step "STEP 1: Preparing host directories via privileged DaemonSet"
 
-# We create a short-lived Job per node to mkdir the host paths
-# This avoids needing SSH access to the nodes
+# # We create a short-lived Job per node to mkdir the host paths
+# # This avoids needing SSH access to the nodes
 
-for NODE in "${VAULT_NODE}" "${POSTGRES_NODE}"; do
-  if [[ "${NODE}" == "${VAULT_NODE}" ]]; then
-    DIR="/mnt/tampon/vault"
-    JOB_NAME="mkdir-vault"
-  else
-    DIR="/mnt/tampon/postgres"
-    JOB_NAME="mkdir-postgres"
-  fi
+# for NODE in "${VAULT_NODE}" "${POSTGRES_NODE}"; do
+#   if [[ "${NODE}" == "${VAULT_NODE}" ]]; then
+#     DIR="/mnt/tampon/vault"
+#     JOB_NAME="mkdir-vault"
+#   else
+#     DIR="/mnt/tampon/postgres"
+#     JOB_NAME="mkdir-postgres"
+#   fi
 
-  log_info "Creating ${DIR} on node ${NODE}..."
+#   log_info "Creating ${DIR} on node ${NODE}..."
 
-  # Delete previous job if exists
-  kubectl delete job "${JOB_NAME}" --ignore-not-found=true -n kube-system
+#   # Delete previous job if exists
+#   kubectl delete job "${JOB_NAME}" --ignore-not-found=true -n kube-system
 
-  kubectl apply -f - <<EOF
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: ${JOB_NAME}
-  namespace: kube-system
-spec:
-  ttlSecondsAfterFinished: 60
-  template:
-    spec:
-      restartPolicy: OnFailure
-      nodeSelector:
-        kubernetes.io/hostname: ${NODE}
-      tolerations:
-        - operator: Exists
-      hostPID: true
-      containers:
-        - name: mkdir
-          image: busybox:1.36
-          command:
-            - sh
-            - -c
-            - |
-              mkdir -p ${DIR}
-              chmod 777 ${DIR}
-              echo "Directory ${DIR} ready on node ${NODE}"
-          securityContext:
-            privileged: true
-          volumeMounts:
-            - name: host-root
-              mountPath: /mnt/host
-      volumes:
-        - name: host-root
-          hostPath:
-            path: /
-            type: Directory
-EOF
+#   kubectl apply -f - <<EOF
+# apiVersion: batch/v1
+# kind: Job
+# metadata:
+#   name: ${JOB_NAME}
+#   namespace: kube-system
+# spec:
+#   ttlSecondsAfterFinished: 60
+#   template:
+#     spec:
+#       restartPolicy: OnFailure
+#       nodeSelector:
+#         kubernetes.io/hostname: ${NODE}
+#       tolerations:
+#         - operator: Exists
+#       hostPID: true
+#       containers:
+#         - name: mkdir
+#           image: busybox:1.36
+#           command:
+#             - sh
+#             - -c
+#             - |
+#               mkdir -p ${DIR}
+#               chmod 777 ${DIR}
+#               echo "Directory ${DIR} ready on node ${NODE}"
+#           securityContext:
+#             privileged: true
+#           volumeMounts:
+#             - name: host-root
+#               mountPath: /mnt/host
+#       volumes:
+#         - name: host-root
+#           hostPath:
+#             path: /
+#             type: Directory
+# EOF
 
-  # Wait for job to complete
-  log_info "Waiting for job ${JOB_NAME} to complete..."
-  kubectl wait --for=condition=complete job/"${JOB_NAME}" \
-    -n kube-system --timeout=60s || \
-    log_warn "Job ${JOB_NAME} did not complete in time — continuing anyway"
-done
+#   # Wait for job to complete
+#   log_info "Waiting for job ${JOB_NAME} to complete..."
+#   kubectl wait --for=condition=complete job/"${JOB_NAME}" \
+#     -n kube-system --timeout=60s || \
+#     log_warn "Job ${JOB_NAME} did not complete in time — continuing anyway"
+# done
 
-log_success "Host directories prepared"
+# log_success "Host directories prepared"
 
 # =============================================================================
 # STEP 2 — Apply storage (StorageClass + PVs) with correct node names

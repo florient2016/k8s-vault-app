@@ -1,20 +1,28 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: itssolutions-db
-  labels:
-    app.kubernetes.io/managed-by: itssolutions
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: itssolutions-prod
-  labels:
-    app.kubernetes.io/managed-by: itssolutions
+# =============================================================================
+# 00-namespace.yaml
+# Creates all required namespaces
+# =============================================================================
+
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: vault
   labels:
-    app.kubernetes.io/managed-by: itssolutions
+    name: vault
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: itssolutions-db
+  labels:
+    name: itssolutions-db
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: itssolutions-prod
+  labels:
+    name: itssolutions-prod
