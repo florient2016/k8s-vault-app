@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: itssolutions-db
+  labels:
+    app.kubernetes.io/managed-by: deploy-script
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: itssolutions-prod
+  labels:
+    app.kubernetes.io/managed-by: deploy-script
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vault
+  labels:
+    app.kubernetes.io/managed-by: deploy-script

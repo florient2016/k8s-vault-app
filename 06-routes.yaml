@@ -1,0 +1,43 @@
+---
+# Frontend Route with TLS Edge Termination
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: frontend-route
+  namespace: itssolutions-prod
+  labels:
+    app: frontend
+spec:
+  host: ""
+  to:
+    kind: Service
+    name: frontend-service
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+---
+# Backend Route with TLS Edge Termination (for direct API access if needed)
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: backend-route
+  namespace: itssolutions-prod
+  labels:
+    app: backend
+spec:
+  host: ""
+  path: /api
+  to:
+    kind: Service
+    name: backend-service
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

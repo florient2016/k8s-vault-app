@@ -1,0 +1,366 @@
+---
+# ServiceAccount for backend (used by Vault sidecar injector)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: backend-sa
+  namespace: itssolutions-prod
+  labels:
+    app: backend
+---
+# ConfigMap with backend application source code
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-source
+  namespace: itssolutions-prod
+  labels:
+    app: backend
+data:
+  server.js: |
+    'use strict';
+    const express = require('express');
+    const helmet = require('helmet');
+    const cors = require('cors');
+    const rateLimit = require('express-rate-limit');
+    const jwt = require('jsonwebtoken');
+    const bcrypt = require('bcryptjs');
+    const { Pool } = require('pg');
+
+    const app = express();
+    const PORT = process.env.PORT || 3000;
+
+    // Security middleware
+    app.use(helmet());
+    app.use(cors({
+      origin: process.env.FRONTEND_URL || '*',
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization'],
+      credentials: true
+    }));
+    app.use(express.json({ limit: '10kb' }));
+
+    // Rate limiting for login endpoint
+    const loginLimiter = rateLimit({
+      windowMs: 15 * 60 * 1000, // 15 minutes
+      max: 10,
+      standardHeaders: true,
+      legacyHeaders: false,
+      message: { error: 'Too many login attempts, please try again after 15 minutes.' }
+    });
+
+    // PostgreSQL pool (credentials loaded from Vault via env)
+    const pool = new Pool({
+      host: process.env.DB_HOST,
+      port: parseInt(process.env.DB_PORT || '5432'),
+      database: process.env.DB_NAME,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    });
+
+    const JWT_SECRET = process.env.JWT_SECRET;
+
+    // Initialize DB: create users table and seed admin user
+    async function initDB() {
+      const client = await pool.connect();
+      try {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+          )
+        `);
+        // Seed default admin user
+        const existing = await client.query("SELECT id FROM users WHERE username = 'admin'");
+        if (existing.rows.length === 0) {
+          const hash = await bcrypt.hash('Admin@1234!', 12);
+          await client.query(
+            "INSERT INTO users (username, password_hash) VALUES ($1, $2)",
+            ['admin', hash]
+          );
+          console.log('Default admin user created.');
+        }
+        console.log('Database initialized successfully.');
+      } catch (err) {
+        console.error('DB init error:', err.message);
+      } finally {
+        client.release();
+      }
+    }
+
+    // Health check
+    app.get('/health', async (req, res) => {
+      try {
+        await pool.query('SELECT 1');
+        res.json({ status: 'healthy', db: 'connected', timestamp: new Date().toISOString() });
+      } catch (err) {
+        res.status(503).json({ status: 'unhealthy', db: 'disconnected', error: err.message });
+      }
+    });
+
+    // Login endpoint
+    app.post('/api/auth/login', loginLimiter, async (req, res) => {
+      const { username, password } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ error: 'Username and password are required.' });
+      }
+      try {
+        const result = await pool.query(
+          "SELECT id, username, password_hash FROM users WHERE username = $1",
+          [username]
+        );
+        if (result.rows.length === 0) {
+          return res.status(401).json({ error: 'Invalid credentials.' });
+        }
+        const user = result.rows[0];
+        const isValid = await bcrypt.compare(password, user.password_hash);
+        if (!isValid) {
+          return res.status(401).json({ error: 'Invalid credentials.' });
+        }
+        const token = jwt.sign(
+          { userId: user.id, username: user.username },
+          JWT_SECRET,
+          { expiresIn: '8h', algorithm: 'HS256' }
+        );
+        res.json({ token, username: user.username, expiresIn: '8h' });
+      } catch (err) {
+        console.error('Login error:', err.message);
+        res.status(500).json({ error: 'Internal server error.' });
+      }
+    });
+
+    // Token verify endpoint
+    app.get('/api/auth/verify', (req, res) => {
+      const authHeader = req.headers['authorization'];
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'No token provided.' });
+      }
+      const token = authHeader.split(' ')[1];
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        res.json({ valid: true, username: decoded.username, userId: decoded.userId });
+      } catch (err) {
+        res.status(401).json({ valid: false, error: 'Invalid or expired token.' });
+      }
+    });
+
+    // Protected dashboard endpoint
+    app.get('/api/dashboard', (req, res) => {
+      const authHeader = req.headers['authorization'];
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'No token provided.' });
+      }
+      const token = authHeader.split(' ')[1];
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        res.json({
+          message: `Welcome to the dashboard, ${decoded.username}!`,
+          user: decoded.username,
+          serverTime: new Date().toISOString()
+        });
+      } catch (err) {
+        res.status(401).json({ error: 'Invalid or expired token.' });
+      }
+    });
+
+    // 404 handler
+    app.use((req, res) => {
+      res.status(404).json({ error: 'Not found.' });
+    });
+
+    // Global error handler
+    app.use((err, req, res, next) => {
+      console.error(err.stack);
+      res.status(500).json({ error: 'Internal server error.' });
+    });
+
+    // Start server
+    async function start() {
+      if (!JWT_SECRET) {
+        console.error('FATAL: JWT_SECRET is not set. Check Vault sidecar injection.');
+        process.exit(1);
+      }
+      if (!process.env.DB_HOST) {
+        console.error('FATAL: DB_HOST is not set. Check Vault sidecar injection.');
+        process.exit(1);
+      }
+      await initDB();
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`Backend server running on port ${PORT}`);
+      });
+    }
+
+    start().catch(err => {
+      console.error('Startup error:', err);
+      process.exit(1);
+    });
+
+  package.json: |
+    {
+      "name": "itssolutions-backend",
+      "version": "1.0.0",
+      "description": "ITS Solutions Backend API",
+      "main": "server.js",
+      "scripts": {
+        "start": "node server.js"
+      },
+      "dependencies": {
+        "bcryptjs": "^2.4.3",
+        "cors": "^2.8.5",
+        "express": "^4.18.2",
+        "express-rate-limit": "^7.1.5",
+        "helmet": "^7.1.0",
+        "jsonwebtoken": "^9.0.2",
+        "pg": "^8.11.3"
+      }
+    }
+
+  entrypoint.sh: |
+    #!/bin/sh
+    set -e
+    echo "=== Backend entrypoint: sourcing Vault secrets ==="
+    # Wait for Vault secrets to be injected
+    RETRY=0
+    until [ -f /vault/secrets/db-creds ] && [ -f /vault/secrets/app-config ]; do
+      RETRY=$((RETRY+1))
+      if [ $RETRY -gt 30 ]; then
+        echo "ERROR: Vault secrets not available after 30 retries. Exiting."
+        exit 1
+      fi
+      echo "Waiting for Vault secrets... attempt $RETRY"
+      sleep 2
+    done
+    echo "Vault secrets found. Sourcing environment variables."
+    source /vault/secrets/db-creds
+    source /vault/secrets/app-config
+    echo "Installing npm dependencies..."
+    cd /app
+    npm install --production --no-audit
+    echo "Starting Node.js server..."
+    exec node server.js
+---
+# Backend Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: itssolutions-prod
+  labels:
+    app: backend
+    version: v1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+        version: v1
+      annotations:
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "itssolutions-backend"
+        vault.hashicorp.com/agent-inject-secret-db-creds: "secret/data/itssolutions/db-creds"
+        vault.hashicorp.com/agent-inject-secret-app-config: "secret/data/itssolutions/app-config"
+        vault.hashicorp.com/agent-inject-template-db-creds: |
+          {{- with secret "secret/data/itssolutions/db-creds" -}}
+          export DB_HOST="{{ .Data.data.host }}"
+          export DB_PORT="{{ .Data.data.port }}"
+          export DB_NAME="{{ .Data.data.database }}"
+          export DB_USER="{{ .Data.data.username }}"
+          export DB_PASSWORD="{{ .Data.data.password }}"
+          {{- end }}
+        vault.hashicorp.com/agent-inject-template-app-config: |
+          {{- with secret "secret/data/itssolutions/app-config" -}}
+          export JWT_SECRET="{{ .Data.data.jwt_secret }}"
+          {{- end }}
+    spec:
+      serviceAccountName: backend-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+        - name: backend
+          image: node:20-alpine
+          command:
+            - sh
+            - /app/entrypoint.sh
+          ports:
+            - containerPort: 3000
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "3000"
+            - name: NODE_ENV
+              value: "production"
+          volumeMounts:
+            - name: backend-source
+              mountPath: /app/server.js
+              subPath: server.js
+            - name: backend-source
+              mountPath: /app/package.json
+              subPath: package.json
+            - name: backend-source
+              mountPath: /app/entrypoint.sh
+              subPath: entrypoint.sh
+            - name: npm-cache
+              mountPath: /root/.npm
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 1001
+      volumes:
+        - name: backend-source
+          configMap:
+            name: backend-source
+            defaultMode: 0755
+        - name: npm-cache
+          emptyDir: {}
+---
+# Backend Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-service
+  namespace: itssolutions-prod
+  labels:
+    app: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+    - port: 3000
+      targetPort: 3000
+      protocol: TCP
+      name: http
