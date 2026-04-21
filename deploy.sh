@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
 # deploy.sh
-# Full automated deployment — applies all manifests in order
-# Handles local-storage PV/PVC + Vault + PostgreSQL + Backend + Frontend
+# Full deployment script
+# Assumes local storage already exists on worker1 and worker2
+# No auto-patching of node names needed
 # =============================================================================
 
 set -euo pipefail
 
-# -----------------------------------------------------------------------------
-# Colors and logging
-# -----------------------------------------------------------------------------
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -21,243 +19,158 @@ log_info()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
 log_success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
-log_step()    { echo -e "\n${CYAN}=== $* ===${NC}\n"; }
+log_step()    { echo -e "\n${CYAN}==============================${NC}"; \
+                echo -e "${CYAN} $* ${NC}"; \
+                echo -e "${CYAN}==============================${NC}\n"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# -----------------------------------------------------------------------------
-# Prereqs
-# -----------------------------------------------------------------------------
-for cmd in kubectl helm jq; do
-  command -v "$cmd" &>/dev/null || log_error "Required tool not found: $cmd"
+# =============================================================================
+# Verify nodes exist
+# =============================================================================
+log_step "Verifying cluster nodes"
+
+for NODE in worker1 worker2; do
+  if kubectl get node "${NODE}" &>/dev/null; then
+    STATUS=$(kubectl get node "${NODE}" -o jsonpath='{.status.conditions[-1].type}')
+    log_success "Node ${NODE} found — status: ${STATUS}"
+  else
+    log_error "Node ${NODE} not found in cluster. Check node names with: kubectl get nodes"
+  fi
 done
 
-# Use oc if available (OpenShift), fall back to kubectl
-OC=$(command -v oc 2>/dev/null || echo "kubectl")
-log_info "Using CLI: ${OC}"
+# Verify local paths exist on nodes
+log_info "Verifying local storage paths on nodes..."
+
+for CHECK in "worker1:/mnt/tampon/vault" "worker2:/mnt/tampon/postgres"; do
+  NODE="${CHECK%%:*}"
+  PATH_CHECK="${CHECK##*:}"
+  RESULT=$(kubectl debug node/"${NODE}" \
+    -it --image=busybox:1.35 \
+    --quiet -- \
+    sh -c "test -d /host${PATH_CHECK} && echo OK || echo MISSING" \
+    2>/dev/null || echo "SKIP")
+  if [[ "${RESULT}" == "MISSING" ]]; then
+    log_error "Path ${PATH_CHECK} does not exist on ${NODE}"
+  else
+    log_success "Path ${PATH_CHECK} on ${NODE}: OK"
+  fi
+done
 
 # =============================================================================
-# STEP 0 — Detect node names for PV nodeAffinity
+# Step 1 — Namespaces
 # =============================================================================
-log_step "STEP 0: Detecting cluster nodes"
-
-NODES=($(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'))
-NODE_COUNT=${#NODES[@]}
-log_info "Found ${NODE_COUNT} node(s): ${NODES[*]}"
-
-if [[ ${NODE_COUNT} -lt 1 ]]; then
-  log_error "No nodes found in cluster"
-fi
-
-# Assign nodes for PVs (if only 1 node available, use it for both)
-VAULT_NODE="${NODES[0]}"
-POSTGRES_NODE="${NODES[$(( NODE_COUNT > 1 ? 1 : 0 ))]}"
-
-log_info "Vault PV    → node: ${VAULT_NODE}"
-log_info "Postgres PV → node: ${POSTGRES_NODE}"
-
-# # =============================================================================
-# # STEP 1 — Create host directories on nodes
-# # =============================================================================
-# log_step "STEP 1: Preparing host directories via privileged DaemonSet"
-
-# # We create a short-lived Job per node to mkdir the host paths
-# # This avoids needing SSH access to the nodes
-
-# for NODE in "${VAULT_NODE}" "${POSTGRES_NODE}"; do
-#   if [[ "${NODE}" == "${VAULT_NODE}" ]]; then
-#     DIR="/mnt/tampon/vault"
-#     JOB_NAME="mkdir-vault"
-#   else
-#     DIR="/mnt/tampon/postgres"
-#     JOB_NAME="mkdir-postgres"
-#   fi
-
-#   log_info "Creating ${DIR} on node ${NODE}..."
-
-#   # Delete previous job if exists
-#   kubectl delete job "${JOB_NAME}" --ignore-not-found=true -n kube-system
-
-#   kubectl apply -f - <<EOF
-# apiVersion: batch/v1
-# kind: Job
-# metadata:
-#   name: ${JOB_NAME}
-#   namespace: kube-system
-# spec:
-#   ttlSecondsAfterFinished: 60
-#   template:
-#     spec:
-#       restartPolicy: OnFailure
-#       nodeSelector:
-#         kubernetes.io/hostname: ${NODE}
-#       tolerations:
-#         - operator: Exists
-#       hostPID: true
-#       containers:
-#         - name: mkdir
-#           image: busybox:1.36
-#           command:
-#             - sh
-#             - -c
-#             - |
-#               mkdir -p ${DIR}
-#               chmod 777 ${DIR}
-#               echo "Directory ${DIR} ready on node ${NODE}"
-#           securityContext:
-#             privileged: true
-#           volumeMounts:
-#             - name: host-root
-#               mountPath: /mnt/host
-#       volumes:
-#         - name: host-root
-#           hostPath:
-#             path: /
-#             type: Directory
-# EOF
-
-#   # Wait for job to complete
-#   log_info "Waiting for job ${JOB_NAME} to complete..."
-#   kubectl wait --for=condition=complete job/"${JOB_NAME}" \
-#     -n kube-system --timeout=60s || \
-#     log_warn "Job ${JOB_NAME} did not complete in time — continuing anyway"
-# done
-
-# log_success "Host directories prepared"
-
-# =============================================================================
-# STEP 2 — Apply storage (StorageClass + PVs) with correct node names
-# =============================================================================
-log_step "STEP 2: Applying StorageClass and PersistentVolumes"
-
-# Patch 00-storage.yaml with actual node names
-STORAGE_FILE="${SCRIPT_DIR}/00-storage.yaml"
-STORAGE_TMP=$(mktemp /tmp/storage-XXXXX.yaml)
-
-sed \
-  -e "s/worker-0/${VAULT_NODE}/g" \
-  -e "s/worker-1/${POSTGRES_NODE}/g" \
-  "${STORAGE_FILE}" > "${STORAGE_TMP}"
-
-kubectl apply -f "${STORAGE_TMP}"
-rm -f "${STORAGE_TMP}"
-log_success "StorageClass and PVs applied"
-
-# =============================================================================
-# STEP 3 — Create namespaces
-# =============================================================================
-log_step "STEP 3: Creating namespaces"
+log_step "STEP 1: Creating namespaces"
 kubectl apply -f "${SCRIPT_DIR}/00-namespace.yaml"
 log_success "Namespaces created"
 
-# Apply SCC for OpenShift if oc is available
-if command -v oc &>/dev/null; then
-  log_info "OpenShift detected — applying anyuid SCC..."
-  oc adm policy add-scc-to-user anyuid \
-    system:serviceaccount:itssolutions-db:default 2>/dev/null || true
-  oc adm policy add-scc-to-user anyuid \
-    system:serviceaccount:itssolutions-prod:backend-sa 2>/dev/null || true
-  oc adm policy add-scc-to-user anyuid \
-    system:serviceaccount:vault:vault 2>/dev/null || true
-  log_success "SCC applied"
-fi
+# =============================================================================
+# Step 2 — StorageClass and PersistentVolumes
+# =============================================================================
+log_step "STEP 2: Applying StorageClass and PersistentVolumes"
+kubectl apply -f "${SCRIPT_DIR}/00-storage.yaml"
 
-# =============================================================================
-# STEP 4 — Install Vault
-# =============================================================================
-log_step "STEP 4: Installing HashiCorp Vault"
-chmod +x "${SCRIPT_DIR}/01-vault-install.sh"
-"${SCRIPT_DIR}/01-vault-install.sh"
-log_success "Vault installed and initialized"
-
-# =============================================================================
-# STEP 5 — Configure Vault
-# =============================================================================
-log_step "STEP 5: Configuring Vault secrets, policies and Kubernetes auth"
-chmod +x "${SCRIPT_DIR}/02-vault-config.sh"
-"${SCRIPT_DIR}/02-vault-config.sh"
-log_success "Vault configured"
-
-# =============================================================================
-# STEP 6 — Deploy PostgreSQL
-# =============================================================================
-log_step "STEP 6: Deploying PostgreSQL"
-kubectl apply -f "${SCRIPT_DIR}/03-postgres.yaml"
-
-log_info "Waiting for PostgreSQL PVC to be bound..."
-for i in $(seq 1 30); do
-  PVC_STATUS=$(kubectl get pvc postgres-pvc -n itssolutions-db \
-    -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
-  if [[ "${PVC_STATUS}" == "Bound" ]]; then
-    log_success "PostgreSQL PVC is Bound"
-    break
-  fi
-  log_warn "Attempt ${i}/30 — PVC status: ${PVC_STATUS}"
-  sleep 5
+# Wait for PVs to be Available
+log_info "Waiting for PVs to become Available..."
+for PV in vault-pv postgres-pv; do
+  for i in $(seq 1 20); do
+    PV_STATUS=$(kubectl get pv "${PV}" \
+      -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
+    if [[ "${PV_STATUS}" == "Available" ]]; then
+      log_success "PV ${PV}: Available"
+      break
+    fi
+    log_warn "PV ${PV}: ${PV_STATUS} — waiting... (${i}/20)"
+    sleep 3
+  done
 done
 
-log_info "Waiting for PostgreSQL pod to be Ready..."
+# =============================================================================
+# Step 3 — Install Vault
+# =============================================================================
+log_step "STEP 3: Installing Vault"
+chmod +x "${SCRIPT_DIR}/01-vault-install.sh"
+"${SCRIPT_DIR}/01-vault-install.sh"
+
+# =============================================================================
+# Step 4 — Configure Vault (store all credentials)
+# =============================================================================
+log_step "STEP 4: Configuring Vault and storing all credentials"
+chmod +x "${SCRIPT_DIR}/02-vault-config.sh"
+"${SCRIPT_DIR}/02-vault-config.sh"
+
+# =============================================================================
+# Step 5 — Deploy PostgreSQL
+# =============================================================================
+log_step "STEP 5: Deploying PostgreSQL"
+kubectl apply -f "${SCRIPT_DIR}/03-postgres.yaml"
+
+log_info "Waiting for PostgreSQL to be ready (up to 5 min)..."
 kubectl rollout status deployment/postgres \
-  -n itssolutions-db --timeout=180s
+  -n itssolutions-db \
+  --timeout=300s
 log_success "PostgreSQL is ready"
 
 # =============================================================================
-# STEP 7 — Deploy Backend
+# Step 6 — Deploy Backend
 # =============================================================================
-log_step "STEP 7: Deploying Backend (2 replicas)"
+log_step "STEP 6: Deploying Backend"
 kubectl apply -f "${SCRIPT_DIR}/04-backend.yaml"
 
-log_info "Waiting for backend pods to be Ready (Vault sidecar injection takes ~60s)..."
+log_info "Waiting for Backend to be ready (up to 5 min)..."
 kubectl rollout status deployment/backend \
-  -n itssolutions-prod --timeout=300s
+  -n itssolutions-prod \
+  --timeout=300s
 log_success "Backend is ready"
 
 # =============================================================================
-# STEP 8 — Deploy Frontend
+# Step 7 — Deploy Frontend
 # =============================================================================
-log_step "STEP 8: Deploying Frontend"
+log_step "STEP 7: Deploying Frontend"
 kubectl apply -f "${SCRIPT_DIR}/05-frontend.yaml"
+
+log_info "Waiting for Frontend to be ready (up to 3 min)..."
 kubectl rollout status deployment/frontend \
-  -n itssolutions-prod --timeout=120s
+  -n itssolutions-prod \
+  --timeout=180s
 log_success "Frontend is ready"
 
 # =============================================================================
-# STEP 9 — Apply Routes
+# Step 8 — Apply Routes / Ingress
 # =============================================================================
-log_step "STEP 9: Applying TLS Routes"
+log_step "STEP 8: Applying Routes"
 kubectl apply -f "${SCRIPT_DIR}/06-routes.yaml"
 log_success "Routes applied"
 
 # =============================================================================
-# FINAL — Print summary
+# Final Summary
 # =============================================================================
 echo ""
 echo -e "${GREEN}============================================================${NC}"
 echo -e "${GREEN}  DEPLOYMENT COMPLETE${NC}"
 echo -e "${GREEN}============================================================${NC}"
 echo ""
-
-# Get frontend URL
-if command -v oc &>/dev/null; then
-  FRONTEND_HOST=$(oc get route frontend \
-    -n itssolutions-prod \
-    -o jsonpath='{.spec.host}' 2>/dev/null || echo "route-not-found")
-  FRONTEND_URL="https://${FRONTEND_HOST}"
-else
-  FRONTEND_SVC=$(kubectl get svc frontend \
-    -n itssolutions-prod \
-    -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "pending")
-  FRONTEND_URL="http://${FRONTEND_SVC}:8080"
-fi
-
-echo -e "  ${CYAN}Frontend URL  :${NC} ${FRONTEND_URL}"
-echo -e "  ${CYAN}Default user  :${NC} admin"
-echo -e "  ${CYAN}Default pass  :${NC} Admin@1234!"
+echo -e "  ${CYAN}Namespaces:${NC}"
+kubectl get namespaces | grep -E "itssolutions|vault"
 echo ""
-echo -e "  ${YELLOW}Storage nodes :${NC}"
-echo -e "    Vault PV    → ${VAULT_NODE}   (/mnt/tampon/vault)"
-echo -e "    Postgres PV → ${POSTGRES_NODE}  (/mnt/tampon/postgres)"
+echo -e "  ${CYAN}PersistentVolumes:${NC}"
+kubectl get pv vault-pv postgres-pv
 echo ""
-echo -e "  ${YELLOW}Vault init file:${NC} /tmp/vault-init.json"
+echo -e "  ${CYAN}PersistentVolumeClaims:${NC}"
+kubectl get pvc -n vault
+kubectl get pvc -n itssolutions-db
+echo ""
+echo -e "  ${CYAN}Pods:${NC}"
+kubectl get pods -n vault
+kubectl get pods -n itssolutions-db
+kubectl get pods -n itssolutions-prod
+echo ""
+echo -e "  ${CYAN}Services:${NC}"
+kubectl get svc -n itssolutions-prod
+echo ""
+echo -e "  ${YELLOW}Default login credentials:${NC}"
+echo -e "    Username : admin"
+echo -e "    Password : Admin@1234!"
+echo ""
+echo -e "  ${YELLOW}All other credentials are stored exclusively in Vault.${NC}"
 echo -e "${GREEN}============================================================${NC}"
-echo ""
