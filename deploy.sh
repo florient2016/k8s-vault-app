@@ -86,6 +86,18 @@ log_success "PostgreSQL is ready"
 log_step "STEP 6: Deploying Backend"
 kubectl apply -f "${SCRIPT_DIR}/04-backend.yaml"
 
+VAULT_TOKEN=$(python3 -c "import json; print(json.load(open('/tmp/vault-init.json'))['root_token'])")
+
+kubectl exec -n vault vault-0 -- \
+  env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN="${VAULT_TOKEN}" \
+  vault write auth/kubernetes/role/itssolutions-db-init \
+    bound_service_account_names=postgres-sa \
+    bound_service_account_namespaces=itssolutions-db \
+    policies=itssolutions-policy \
+    ttl=1h \
+    max_ttl=24h
+
+
 log_info "Waiting for Backend to be ready (up to 5 min)..."
 kubectl rollout status deployment/backend \
   -n itssolutions-prod \
