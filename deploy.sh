@@ -97,7 +97,73 @@ log_success "PostgreSQL is ready"
 # Step 6 — Deploy Backend
 
 log_step "STEP 6: Deploying Backend"
+
+
+
+# Get the password from Vault secrets file
+DB_PASS=$(kubectl exec -n itssolutions-prod \
+  $(kubectl get pod -n itssolutions-prod -l app=backend -o jsonpath='{.items[0].metadata.name}') \
+  -c vault-agent -- cat /vault/secrets/db-creds | grep DB_PASSWORD | cut -d'"' -f2)
+
+#echo "Password from Vault: $DB_PASS"
+
+# Create user, database, and grant privileges
+kubectl exec -n itssolutions-db \
+  $(kubectl get pod -n itssolutions-db -l app=postgres -o jsonpath='{.items[0].metadata.name}') \
+  -- psql -U postgres <<EOF
+CREATE USER itssolutions WITH PASSWORD '$DB_PASS';
+CREATE DATABASE itssolutions_db OWNER itssolutions;
+GRANT ALL PRIVILEGES ON DATABASE itssolutions_db TO itssolutions;
+EOF
+
+POSTGRES_POD=$(kubectl get pod -n itssolutions-db -l app=postgres -o jsonpath='{.items[0].metadata.name}')
+
+# Create the user
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -c "CREATE USER itssolutions WITH PASSWORD '$DB_PASS';"
+
+# Grant privileges
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE itssolutions_db TO itssolutions;"
+
+POSTGRES_POD=$(kubectl get pod -n itssolutions-db -l app=postgres -o jsonpath='{.items[0].metadata.name}')
+
+# Grant schema permissions
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -d itssolutions_db -c "GRANT ALL ON SCHEMA public TO itssolutions;"
+
+# Grant on all existing tables
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -d itssolutions_db -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO itssolutions;"
+
+# Grant on all sequences (needed for auto-increment/serial columns)
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -d itssolutions_db -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO itssolutions;"
+
+# Set default privileges for future objects
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -d itssolutions_db -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO itssolutions;"
+
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -d itssolutions_db -c "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO itssolutions;"
+
+# Make itssolutions the schema owner to avoid future issues
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -d itssolutions_db -c "ALTER SCHEMA public OWNER TO itssolutions;"
+
+
+# Verify user exists with password this time
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -c "SELECT usename, passwd FROM pg_shadow WHERE usename='itssolutions';"
+
+# Test login
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U itssolutions -d itssolutions_db -c "SELECT current_user, current_database();"
+
+
 kubectl apply -f "${SCRIPT_DIR}/04-backend.yaml"
+
+kubectl rollout restart deployment/backend -n itssolutions-prod
 
 log_info "Waiting for Backend to be ready (up to 10 min — npm install on first start)..."
 kubectl rollout status deployment/backend \
