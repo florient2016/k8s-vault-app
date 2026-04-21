@@ -1,44 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== [01] Installing HashiCorp Vault via Helm ==="
-
-# Add HashiCorp Helm repo
+echo "=== [1/4] Adding HashiCorp Helm repository ==="
 helm repo add hashicorp https://helm.releases.hashicorp.com
 helm repo update
 
-# Install Vault with injector enabled in namespace vault
+echo "=== [2/4] Installing Vault via Helm in namespace 'vault' ==="
 helm upgrade --install vault hashicorp/vault \
   --namespace vault \
   --create-namespace \
   --set "server.dev.enabled=false" \
-  --set "server.standalone.enabled=true" \
-  --set "server.standalone.config=\
-ui = true\n\
-listener \"tcp\" {\n\
-  tls_disable = 1\n\
-  address = \"[::]:8200\"\n\
-  cluster_address = \"[::]:8201\"\n\
-}\n\
-storage \"file\" {\n\
-  path = \"/vault/data\"\n\
-}\n" \
+  --set "server.ha.enabled=false" \
   --set "injector.enabled=true" \
-  --set "injector.authPath=auth/kubernetes" \
-  --set "server.image.repository=hashicorp/vault" \
-  --set "server.image.tag=1.15.2" \
-  --set "server.resources.requests.memory=256Mi" \
-  --set "server.resources.requests.cpu=250m" \
-  --set "server.resources.limits.memory=512Mi" \
-  --set "server.resources.limits.cpu=500m" \
-  --wait --timeout=10m
+  --set "server.dataStorage.enabled=true" \
+  --set "server.dataStorage.size=1Gi" \
+  --wait --timeout 300s
 
-echo "=== Waiting for Vault pod to be Running ==="
-oc -n vault wait --for=condition=Ready pod -l app.kubernetes.io/name=vault --timeout=300s
+echo "=== [3/4] Waiting for Vault pod to be Running ==="
+kubectl wait --namespace vault \
+  --for=condition=Ready pod \
+  --selector app.kubernetes.io/name=vault \
+  --timeout=300s
 
-echo "=== Initializing Vault ==="
-# Initialize Vault (single key share for demo/dev simplicity)
-INIT_OUTPUT=$(oc -n vault exec vault-0 -- vault operator init \
+echo "=== [4/4] Initializing and unsealing Vault (single-node dev-like init) ==="
+# Initialize Vault
+INIT_OUTPUT=$(kubectl exec -n vault vault-0 -- vault operator init \
   -key-shares=1 \
   -key-threshold=1 \
   -format=json)
@@ -46,15 +32,17 @@ INIT_OUTPUT=$(oc -n vault exec vault-0 -- vault operator init \
 UNSEAL_KEY=$(echo "$INIT_OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['unseal_keys_b64'][0])")
 ROOT_TOKEN=$(echo "$INIT_OUTPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['root_token'])")
 
-echo "=== Saving Vault keys to vault-keys.txt (KEEP SECURE) ==="
-cat <<EOF > vault-keys.txt
-VAULT_UNSEAL_KEY=${UNSEAL_KEY}
-VAULT_ROOT_TOKEN=${ROOT_TOKEN}
-EOF
-chmod 600 vault-keys.txt
+echo "Unseal Key : $UNSEAL_KEY"
+echo "Root Token : $ROOT_TOKEN"
 
-echo "=== Unsealing Vault ==="
-oc -n vault exec vault-0 -- vault operator unseal "$UNSEAL_KEY"
+# Persist keys locally for the config script
+echo "$UNSEAL_KEY" > /tmp/vault-unseal-key.txt
+echo "$ROOT_TOKEN"  > /tmp/vault-root-token.txt
 
-echo "=== Vault installed and unsealed successfully ==="
-echo "Root token and unseal key saved to vault-keys.txt"
+# Unseal
+kubectl exec -n vault vault-0 -- vault operator unseal "$UNSEAL_KEY"
+
+echo ""
+echo "✅  Vault installed, initialized and unsealed."
+echo "    Unseal key saved to : /tmp/vault-unseal-key.txt"
+echo "    Root token saved to : /tmp/vault-root-token.txt"

@@ -1,5 +1,4 @@
----
-# Frontend Route with TLS Edge Termination
+# ─── OpenShift Route: Frontend (TLS Edge) ─────────────────────────────────────
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
@@ -8,7 +7,7 @@ metadata:
   labels:
     app: frontend
 spec:
-  host: ""
+  host: ""           # Auto-assigned by OpenShift
   to:
     kind: Service
     name: frontend-service
@@ -20,7 +19,7 @@ spec:
     insecureEdgeTerminationPolicy: Redirect
   wildcardPolicy: None
 ---
-# Backend Route with TLS Edge Termination (for direct API access if needed)
+# ─── OpenShift Route: Backend API (TLS Edge) ──────────────────────────────────
 apiVersion: route.openshift.io/v1
 kind: Route
 metadata:
@@ -29,7 +28,7 @@ metadata:
   labels:
     app: backend
 spec:
-  host: ""
+  host: ""           # Auto-assigned by OpenShift
   path: /api
   to:
     kind: Service

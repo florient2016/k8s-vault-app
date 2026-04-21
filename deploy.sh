@@ -2,100 +2,125 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
 
-echo "=============================================="
-echo " ITS Solutions - OpenShift Deployment Script"
-echo "=============================================="
-
-# Check prerequisites
-command -v oc >/dev/null 2>&1 || { echo "ERROR: 'oc' CLI not found. Please install OpenShift CLI."; exit 1; }
-command -v helm >/dev/null 2>&1 || { echo "ERROR: 'helm' CLI not found. Please install Helm."; exit 1; }
-
-echo ""
-echo "=== Checking OpenShift login status ==="
-oc whoami || { echo "ERROR: Not logged in to OpenShift. Run 'oc login' first."; exit 1; }
-echo "Logged in as: $(oc whoami)"
-echo "Server: $(oc whoami --show-server)"
-
-echo ""
-echo "=== [Step 1] Creating Namespaces ==="
-oc apply -f 00-namespace.yaml
-echo "Namespaces created."
-
-echo ""
-echo "=== [Step 2] Adding SCC anyuid to ServiceAccounts ==="
-# Grant anyuid SCC to service accounts for PostgreSQL and frontend/backend
-oc adm policy add-scc-to-user anyuid -z postgres-sa -n itssolutions-db --as system:admin 2>/dev/null || \
-  oc adm policy add-scc-to-user anyuid -z postgres-sa -n itssolutions-db || true
-oc adm policy add-scc-to-user anyuid -z backend-sa -n itssolutions-prod --as system:admin 2>/dev/null || \
-  oc adm policy add-scc-to-user anyuid -z backend-sa -n itssolutions-prod || true
-oc adm policy add-scc-to-user anyuid -z frontend-sa -n itssolutions-prod --as system:admin 2>/dev/null || \
-  oc adm policy add-scc-to-user anyuid -z frontend-sa -n itssolutions-prod || true
-echo "SCC anyuid granted."
-
-echo ""
-echo "=== [Step 3] Installing HashiCorp Vault ==="
-bash 01-vault-install.sh
-
-echo ""
-echo "=== [Step 4] Deploying PostgreSQL ==="
-oc apply -f 03-postgres.yaml
-
-echo ""
-echo "=== Waiting for PostgreSQL pod to be ready ==="
-oc -n itssolutions-db rollout status deployment/postgres --timeout=300s
-echo "PostgreSQL is ready."
-
-echo ""
-echo "=== [Step 5] Configuring Vault ==="
-bash 02-vault-config.sh
-
-echo ""
-echo "=== [Step 6] Deploying Backend ==="
-oc apply -f 04-backend.yaml
-
-echo ""
-echo "=== Waiting for Backend pods to be ready ==="
-oc -n itssolutions-prod rollout status deployment/backend --timeout=300s
-echo "Backend is ready."
-
-echo ""
-echo "=== [Step 7] Deploying Frontend ==="
-oc apply -f 05-frontend.yaml
-oc -n itssolutions-prod rollout status deployment/frontend --timeout=180s
-echo "Frontend is ready."
-
-echo ""
-echo "=== [Step 8] Creating Routes ==="
-oc apply -f 06-routes.yaml
-
-echo ""
-echo "=============================================="
-echo " Deployment Complete!"
-echo "=============================================="
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║        ITSSolutions – Full Stack Kubernetes Deploy       ║"
+echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
-# Print frontend URL
-FRONTEND_URL=$(oc -n itssolutions-prod get route frontend-route -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
-if [ -n "$FRONTEND_URL" ]; then
-  echo "  Frontend URL : https://${FRONTEND_URL}"
+# ── Helper ─────────────────────────────────────────────────────────────────────
+wait_for_deployment() {
+  local namespace="$1"
+  local deployment="$2"
+  local timeout="${3:-300s}"
+  echo "  ⏳  Waiting for Deployment '$deployment' in namespace '$namespace' (timeout: $timeout)..."
+  kubectl rollout status deployment/"$deployment" -n "$namespace" --timeout="$timeout"
+  echo "  ✅  Deployment '$deployment' is ready."
+}
+
+wait_for_pods_ready() {
+  local namespace="$1"
+  local selector="$2"
+  local timeout="${3:-300}"
+  echo "  ⏳  Waiting for pods with selector '$selector' in '$namespace'..."
+  kubectl wait pod --selector="$selector" -n "$namespace" \
+    --for=condition=Ready --timeout="${timeout}s"
+  echo "  ✅  Pods ready."
+}
+
+# ── SCC for OpenShift (ignore errors on plain k8s) ────────────────────────────
+apply_scc() {
+  echo "=== [SCC] Adding anyuid SCC to service accounts (OpenShift only) ==="
+  oc adm policy add-scc-to-user anyuid -z backend-sa  -n itssolutions-prod 2>/dev/null || true
+  oc adm policy add-scc-to-user anyuid -z default      -n itssolutions-db   2>/dev/null || true
+  oc adm policy add-scc-to-user anyuid -z vault        -n vault             2>/dev/null || true
+  echo ""
+}
+
+# ── Step 1: Namespaces ─────────────────────────────────────────────────────────
+echo "=== [1/7] Applying namespaces ==="
+kubectl apply -f "$SCRIPT_DIR/00-namespace.yaml"
+echo ""
+
+# ── Step 2: Vault install ──────────────────────────────────────────────────────
+echo "=== [2/7] Installing Vault (Helm) ==="
+bash "$SCRIPT_DIR/01-vault-install.sh"
+echo ""
+
+# ── Step 3: SCC ────────────────────────────────────────────────────────────────
+apply_scc
+
+# ── Step 4: Vault configuration ───────────────────────────────────────────────
+echo "=== [4/7] Configuring Vault secrets & auth ==="
+bash "$SCRIPT_DIR/02-vault-config.sh"
+echo ""
+
+# ── Step 5: PostgreSQL ────────────────────────────────────────────────────────
+echo "=== [5/7] Deploying PostgreSQL ==="
+kubectl apply -f "$SCRIPT_DIR/03-postgres.yaml"
+echo "  Waiting for PostgreSQL deployment to be ready..."
+wait_for_deployment "itssolutions-db" "postgres" "300s"
+wait_for_pods_ready "itssolutions-db" "app=postgres" "300"
+echo ""
+
+# ── Step 6: Backend ───────────────────────────────────────────────────────────
+echo "=== [6/7] Deploying Backend (Node.js + Vault sidecar) ==="
+kubectl apply -f "$SCRIPT_DIR/04-backend.yaml"
+echo "  Waiting for backend deployment (includes Vault sidecar init)..."
+wait_for_deployment "itssolutions-prod" "backend" "360s"
+wait_for_pods_ready "itssolutions-prod" "app=backend" "360"
+echo ""
+
+# ── Step 7: Frontend + Routes ─────────────────────────────────────────────────
+echo "=== [7/7] Deploying Frontend and Routes ==="
+kubectl apply -f "$SCRIPT_DIR/05-frontend.yaml"
+wait_for_deployment "itssolutions-prod" "frontend" "180s"
+
+kubectl apply -f "$SCRIPT_DIR/06-routes.yaml"
+echo ""
+
+# ── Print summary ─────────────────────────────────────────────────────────────
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║                  Deployment Complete ✅                  ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+echo "📦  Namespaces:"
+kubectl get namespaces | grep -E "itssolutions|vault" || true
+echo ""
+
+echo "🐘  PostgreSQL:"
+kubectl get pods,svc -n itssolutions-db -l app=postgres || true
+echo ""
+
+echo "⚙️   Backend:"
+kubectl get pods,svc -n itssolutions-prod -l app=backend || true
+echo ""
+
+echo "🌐  Frontend:"
+kubectl get pods,svc -n itssolutions-prod -l app=frontend || true
+echo ""
+
+echo "🔗  Routes:"
+FRONTEND_URL=""
+if command -v oc &>/dev/null; then
+  FRONTEND_URL=$(oc get route frontend-route -n itssolutions-prod \
+    -o jsonpath='{.spec.tls.termination == "edge" && "https" || "http"}://{.spec.host}' 2>/dev/null || true)
+  if [[ -z "$FRONTEND_URL" ]]; then
+    FRONTEND_HOST=$(kubectl get route frontend-route -n itssolutions-prod \
+      -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+    [[ -n "$FRONTEND_HOST" ]] && FRONTEND_URL="https://${FRONTEND_HOST}"
+  fi
+fi
+
+if [[ -n "$FRONTEND_URL" ]]; then
+  echo "  ✅  Frontend URL : $FRONTEND_URL"
+  echo ""
+  echo "  Default credentials:"
+  echo "    Username : admin"
+  echo "    Password : Admin@1234!"
 else
-  echo "  Frontend URL : (route host not yet assigned - check: oc -n itssolutions-prod get route frontend-route)"
+  echo "  Frontend route host not yet assigned."
+  echo "  Run: kubectl get route frontend-route -n itssolutions-prod"
 fi
-
-BACKEND_URL=$(oc -n itssolutions-prod get route backend-route -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
-if [ -n "$BACKEND_URL" ]; then
-  echo "  Backend URL  : https://${BACKEND_URL}/api/health"
-fi
-
 echo ""
-echo "  Default credentials: admin / Admin@1234!"
-echo ""
-echo "  Namespaces:"
-echo "    - itssolutions-db   (PostgreSQL)"
-echo "    - itssolutions-prod (Frontend + Backend)"
-echo "    - vault             (HashiCorp Vault)"
-echo ""
-echo "  Vault keys saved to: vault-keys.txt (KEEP SECURE!)"
-echo "=============================================="

@@ -1,26 +1,14 @@
----
-# ServiceAccount for frontend
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: frontend-sa
-  namespace: itssolutions-prod
-  labels:
-    app: frontend
----
-# ConfigMap with Nginx configuration
+# ─── ConfigMap: Nginx config + React SPA ─────────────────────────────────────
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: nginx-config
+  name: frontend-config
   namespace: itssolutions-prod
-  labels:
-    app: frontend
 data:
   nginx.conf: |
     worker_processes auto;
-    error_log /tmp/nginx_error.log warn;
-    pid /tmp/nginx.pid;
+    error_log  /var/log/nginx/error.log warn;
+    pid        /tmp/nginx.pid;
 
     events {
       worker_connections 1024;
@@ -31,14 +19,12 @@ data:
       default_type  application/octet-stream;
       sendfile      on;
       keepalive_timeout 65;
-      client_max_body_size 10m;
 
       # Security headers
-      add_header X-Frame-Options "SAMEORIGIN" always;
-      add_header X-Content-Type-Options "nosniff" always;
-      add_header X-XSS-Protection "1; mode=block" always;
-      add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';" always;
+      add_header X-Frame-Options           "SAMEORIGIN"            always;
+      add_header X-Content-Type-Options    "nosniff"               always;
+      add_header X-XSS-Protection         "1; mode=block"         always;
+      add_header Referrer-Policy          "strict-origin-when-cross-origin" always;
       add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
       server {
@@ -47,43 +33,20 @@ data:
         root /usr/share/nginx/html;
         index index.html;
 
-        # Gzip
-        gzip on;
-        gzip_vary on;
-        gzip_min_length 1024;
-        gzip_types text/plain text/css text/xml text/javascript application/javascript application/json application/xml+rss;
-
-        # Proxy API requests to backend
+        # Backend API proxy
         location /api/ {
-          proxy_pass http://backend-service.itssolutions-prod.svc.cluster.local:3000;
+          proxy_pass         http://backend-service.itssolutions-prod.svc.cluster.local:3000;
           proxy_http_version 1.1;
-          proxy_set_header Upgrade $http_upgrade;
-          proxy_set_header Connection 'upgrade';
-          proxy_set_header Host $host;
-          proxy_set_header X-Real-IP $remote_addr;
-          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-          proxy_set_header X-Forwarded-Proto $scheme;
-          proxy_cache_bypass $http_upgrade;
-          proxy_connect_timeout 30s;
-          proxy_send_timeout 30s;
+          proxy_set_header   Host              $host;
+          proxy_set_header   X-Real-IP         $remote_addr;
+          proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header   X-Forwarded-Proto $scheme;
           proxy_read_timeout 30s;
-        }
-
-        # Health check endpoint
-        location /health {
-          return 200 'OK';
-          add_header Content-Type text/plain;
         }
 
         # SPA fallback
         location / {
           try_files $uri $uri/ /index.html;
-        }
-
-        # Cache static assets
-        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-          expires 1y;
-          add_header Cache-Control "public, immutable";
         }
       }
     }
@@ -94,11 +57,11 @@ data:
     <head>
       <meta charset="UTF-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>ITS Solutions - Login</title>
+      <title>ITSSolutions – Login</title>
       <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
           background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
           min-height: 100vh;
           display: flex;
@@ -109,11 +72,11 @@ data:
           background: rgba(255,255,255,0.05);
           backdrop-filter: blur(10px);
           border: 1px solid rgba(255,255,255,0.1);
-          border-radius: 20px;
+          border-radius: 16px;
           padding: 48px 40px;
           width: 100%;
-          max-width: 420px;
-          box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+          max-width: 400px;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.4);
         }
         .logo {
           text-align: center;
@@ -121,215 +84,183 @@ data:
         }
         .logo h1 {
           color: #e94560;
-          font-size: 28px;
-          font-weight: 700;
+          font-size: 2rem;
           letter-spacing: 2px;
         }
         .logo p {
           color: rgba(255,255,255,0.5);
-          font-size: 13px;
-          margin-top: 6px;
-        }
-        .form-group {
-          margin-bottom: 20px;
+          font-size: 0.85rem;
+          margin-top: 4px;
         }
         label {
           display: block;
           color: rgba(255,255,255,0.7);
-          font-size: 13px;
-          font-weight: 500;
-          margin-bottom: 8px;
+          font-size: 0.85rem;
+          margin-bottom: 6px;
+          margin-top: 20px;
           text-transform: uppercase;
-          letter-spacing: 0.5px;
+          letter-spacing: 1px;
         }
         input {
           width: 100%;
-          padding: 14px 16px;
-          background: rgba(255,255,255,0.08);
-          border: 1px solid rgba(255,255,255,0.15);
-          border-radius: 10px;
-          color: #fff;
-          font-size: 15px;
-          transition: border-color 0.2s, background 0.2s;
-          outline: none;
-        }
-        input:focus {
-          border-color: #e94560;
-          background: rgba(255,255,255,0.12);
-        }
-        input::placeholder { color: rgba(255,255,255,0.3); }
-        button {
-          width: 100%;
-          padding: 15px;
-          background: linear-gradient(135deg, #e94560, #c62a47);
-          border: none;
-          border-radius: 10px;
-          color: #fff;
-          font-size: 16px;
-          font-weight: 600;
-          cursor: pointer;
-          transition: opacity 0.2s, transform 0.1s;
-          margin-top: 8px;
-          letter-spacing: 0.5px;
-        }
-        button:hover { opacity: 0.9; transform: translateY(-1px); }
-        button:active { transform: translateY(0); }
-        button:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
-        .message {
           padding: 12px 16px;
           border-radius: 8px;
-          font-size: 14px;
-          margin-bottom: 16px;
-          display: none;
-        }
-        .message.error { background: rgba(233,69,96,0.2); border: 1px solid rgba(233,69,96,0.4); color: #ff6b86; }
-        .message.success { background: rgba(46,213,115,0.2); border: 1px solid rgba(46,213,115,0.4); color: #2ed573; }
-        .dashboard {
-          display: none;
-          text-align: center;
+          border: 1px solid rgba(255,255,255,0.15);
+          background: rgba(255,255,255,0.07);
           color: #fff;
+          font-size: 1rem;
+          outline: none;
+          transition: border-color 0.2s;
         }
-        .dashboard h2 { font-size: 24px; margin-bottom: 12px; color: #2ed573; }
-        .dashboard p { color: rgba(255,255,255,0.7); line-height: 1.6; }
-        .logout-btn {
-          margin-top: 24px;
-          background: rgba(255,255,255,0.1);
-          border: 1px solid rgba(255,255,255,0.2);
-          padding: 10px 24px;
-          width: auto;
-          font-size: 14px;
+        input:focus { border-color: #e94560; }
+        button {
+          width: 100%;
+          margin-top: 28px;
+          padding: 14px;
+          border: none;
+          border-radius: 8px;
+          background: linear-gradient(90deg, #e94560, #c23152);
+          color: #fff;
+          font-size: 1rem;
+          font-weight: 600;
+          letter-spacing: 1px;
+          cursor: pointer;
+          transition: opacity 0.2s;
         }
-        .spinner {
-          display: inline-block;
-          width: 16px;
-          height: 16px;
-          border: 2px solid rgba(255,255,255,0.4);
-          border-top-color: #fff;
-          border-radius: 50%;
-          animation: spin 0.8s linear infinite;
-          vertical-align: middle;
-          margin-right: 8px;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .footer {
+        button:hover { opacity: 0.85; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .message {
+          margin-top: 16px;
           text-align: center;
+          font-size: 0.9rem;
+          min-height: 22px;
+        }
+        .message.error   { color: #ff6b6b; }
+        .message.success { color: #6bffb8; }
+        #dashboard {
+          display: none;
+          text-align: center;
+        }
+        #dashboard h2 { color: #6bffb8; font-size: 1.5rem; margin-bottom: 12px; }
+        #dashboard p  { color: rgba(255,255,255,0.7); }
+        #logoutBtn {
+          background: linear-gradient(90deg, #333, #555);
           margin-top: 24px;
-          color: rgba(255,255,255,0.3);
-          font-size: 12px;
+          max-width: 160px;
+          margin-left: auto;
+          margin-right: auto;
+          display: block;
         }
       </style>
     </head>
     <body>
       <div class="container">
         <div class="logo">
-          <h1>ITS Solutions</h1>
-          <p>Secure Enterprise Portal</p>
+          <h1>ITS<span style="color:#fff">Solutions</span></h1>
+          <p>Secure Administration Portal</p>
         </div>
-        <!-- Login Form -->
+
+        <!-- Login form -->
         <div id="loginSection">
-          <div id="message" class="message"></div>
-          <form id="loginForm">
-            <div class="form-group">
-              <label for="username">Username</label>
-              <input type="text" id="username" name="username" placeholder="Enter username" autocomplete="username" required />
-            </div>
-            <div class="form-group">
-              <label for="password">Password</label>
-              <input type="password" id="password" name="password" placeholder="Enter password" autocomplete="current-password" required />
-            </div>
+          <form id="loginForm" novalidate>
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" autocomplete="username"
+                   placeholder="Enter your username" required />
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" autocomplete="current-password"
+                   placeholder="Enter your password" required />
             <button type="submit" id="loginBtn">Sign In</button>
           </form>
+          <div class="message" id="message"></div>
         </div>
-        <!-- Dashboard -->
-        <div id="dashboardSection" class="dashboard">
-          <h2>&#10003; Welcome!</h2>
-          <p id="dashboardMsg">You are successfully authenticated.</p>
-          <br/>
-          <p id="serverTime" style="font-size:13px; color:rgba(255,255,255,0.4);"></p>
-          <button class="logout-btn" id="logoutBtn">Sign Out</button>
+
+        <!-- Dashboard (after login) -->
+        <div id="dashboard">
+          <h2>&#10003; Authenticated</h2>
+          <p>Welcome, <strong id="welcomeUser"></strong>!</p>
+          <p style="margin-top:8px;font-size:0.82rem;color:rgba(255,255,255,0.4)">
+            JWT token stored in session storage.
+          </p>
+          <button id="logoutBtn">Logout</button>
         </div>
-        <div class="footer">Secured with JWT &bull; Vault &bull; OpenShift</div>
       </div>
+
       <script>
-        const API_BASE = '/api';
+        const loginSection = document.getElementById('loginSection');
+        const dashboard    = document.getElementById('dashboard');
+        const msgEl        = document.getElementById('message');
+        const loginBtn     = document.getElementById('loginBtn');
 
-        function showMessage(text, type) {
-          const el = document.getElementById('message');
-          el.textContent = text;
-          el.className = 'message ' + type;
-          el.style.display = 'block';
-          if (type === 'success') setTimeout(() => { el.style.display = 'none'; }, 4000);
+        function showDashboard(username) {
+          loginSection.style.display = 'none';
+          dashboard.style.display    = 'block';
+          document.getElementById('welcomeUser').textContent = username;
         }
 
-        function showDashboard(data) {
-          document.getElementById('loginSection').style.display = 'none';
-          const dash = document.getElementById('dashboardSection');
-          dash.style.display = 'block';
-          document.getElementById('dashboardMsg').textContent =
-            'Welcome, ' + data.user + '! You are successfully authenticated.';
-          if (data.serverTime) {
-            document.getElementById('serverTime').textContent =
-              'Server time: ' + new Date(data.serverTime).toLocaleString();
-          }
-        }
-
-        async function loadDashboard(token) {
+        // Check existing token on page load
+        (async function() {
+          const token = sessionStorage.getItem('jwt');
+          if (!token) return;
           try {
-            const res = await fetch(API_BASE + '/dashboard', {
-              headers: { 'Authorization': 'Bearer ' + token }
+            const res  = await fetch('/api/me', {
+              headers: { Authorization: 'Bearer ' + token }
             });
             if (res.ok) {
               const data = await res.json();
-              showDashboard(data);
+              showDashboard(data.username);
             } else {
-              localStorage.removeItem('token');
+              sessionStorage.removeItem('jwt');
             }
-          } catch (e) { localStorage.removeItem('token'); }
-        }
-
-        // Auto-login if token exists
-        const savedToken = localStorage.getItem('token');
-        if (savedToken) { loadDashboard(savedToken); }
+          } catch (_) {}
+        })();
 
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
           e.preventDefault();
-          const btn = document.getElementById('loginBtn');
+          msgEl.className = 'message';
+          msgEl.textContent = '';
+          loginBtn.disabled = true;
+          loginBtn.textContent = 'Signing in...';
+
           const username = document.getElementById('username').value.trim();
           const password = document.getElementById('password').value;
+
           if (!username || !password) {
-            showMessage('Please enter both username and password.', 'error');
+            msgEl.className = 'message error';
+            msgEl.textContent = 'Please fill in both fields.';
+            loginBtn.disabled = false;
+            loginBtn.textContent = 'Sign In';
             return;
           }
-          btn.disabled = true;
-          btn.innerHTML = '<span class="spinner"></span>Signing in...';
+
           try {
-            const res = await fetch(API_BASE + '/auth/login', {
-              method: 'POST',
+            const res = await fetch('/api/login', {
+              method : 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ username, password })
+              body   : JSON.stringify({ username, password })
             });
             const data = await res.json();
             if (res.ok) {
-              localStorage.setItem('token', data.token);
-              showMessage('Login successful!', 'success');
-              setTimeout(() => loadDashboard(data.token), 500);
-            } else if (res.status === 429) {
-              showMessage('Too many login attempts. Please wait 15 minutes.', 'error');
+              sessionStorage.setItem('jwt', data.token);
+              msgEl.className   = 'message success';
+              msgEl.textContent = 'Login successful!';
+              setTimeout(() => showDashboard(data.username), 600);
             } else {
-              showMessage(data.error || 'Invalid credentials. Please try again.', 'error');
+              msgEl.className   = 'message error';
+              msgEl.textContent = data.error || 'Login failed.';
             }
           } catch (err) {
-            showMessage('Network error. Please check your connection.', 'error');
+            msgEl.className   = 'message error';
+            msgEl.textContent = 'Network error – please try again.';
           } finally {
-            btn.disabled = false;
-            btn.innerHTML = 'Sign In';
+            loginBtn.disabled = false;
+            loginBtn.textContent = 'Sign In';
           }
         });
 
         document.getElementById('logoutBtn').addEventListener('click', () => {
-          localStorage.removeItem('token');
-          document.getElementById('dashboardSection').style.display = 'none';
-          document.getElementById('loginSection').style.display = 'block';
+          sessionStorage.removeItem('jwt');
+          dashboard.style.display    = 'none';
+          loginSection.style.display = 'block';
           document.getElementById('username').value = '';
           document.getElementById('password').value = '';
         });
@@ -337,7 +268,7 @@ data:
     </body>
     </html>
 ---
-# Frontend Deployment
+# ─── Deployment ───────────────────────────────────────────────────────────────
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -355,91 +286,58 @@ spec:
       labels:
         app: frontend
     spec:
-      serviceAccountName: frontend-sa
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1001
-        runAsGroup: 1001
-        fsGroup: 1001
-      initContainers:
-        - name: setup-nginx
-          image: nginx:1.25-alpine
-          command:
-            - sh
-            - -c
-            - |
-              mkdir -p /tmp/nginx/run /tmp/nginx/logs /var/cache/nginx/client_temp
-              mkdir -p /var/cache/nginx/proxy_temp /var/cache/nginx/fastcgi_temp
-              mkdir -p /var/cache/nginx/uwsgi_temp /var/cache/nginx/scgi_temp
-              cp /configmap/index.html /usr/share/nginx/html/index.html
-              echo "Nginx setup complete."
-          volumeMounts:
-            - name: nginx-config
-              mountPath: /configmap
-            - name: html-dir
-              mountPath: /usr/share/nginx/html
-            - name: nginx-tmp
-              mountPath: /tmp/nginx
-            - name: nginx-cache
-              mountPath: /var/cache/nginx
-          securityContext:
-            runAsUser: 1001
-            allowPrivilegeEscalation: false
       containers:
         - name: frontend
           image: nginx:1.25-alpine
+          command:
+            - nginx
+            - -c
+            - /etc/nginx/nginx.conf
+            - -g
+            - "daemon off;"
           ports:
             - containerPort: 8080
-              protocol: TCP
           volumeMounts:
             - name: nginx-config
               mountPath: /etc/nginx/nginx.conf
               subPath: nginx.conf
-            - name: html-dir
-              mountPath: /usr/share/nginx/html
-            - name: nginx-tmp
-              mountPath: /tmp
-            - name: nginx-cache
-              mountPath: /var/cache/nginx
-          resources:
-            requests:
-              memory: "64Mi"
-              cpu: "100m"
-            limits:
-              memory: "128Mi"
-              cpu: "250m"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 3
+            - name: html-content
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
           readinessProbe:
             httpGet:
-              path: /health
+              path: /
               port: 8080
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 5
-            failureThreshold: 3
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
-            runAsNonRoot: true
-            runAsUser: 1001
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
       volumes:
         - name: nginx-config
           configMap:
-            name: nginx-config
-            defaultMode: 0644
-        - name: html-dir
-          emptyDir: {}
-        - name: nginx-tmp
-          emptyDir: {}
-        - name: nginx-cache
-          emptyDir: {}
+            name: frontend-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+        - name: html-content
+          configMap:
+            name: frontend-config
+            items:
+              - key: index.html
+                path: index.html
 ---
-# Frontend Service
+# ─── Service ──────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: Service
 metadata:
@@ -452,7 +350,7 @@ spec:
   selector:
     app: frontend
   ports:
-    - port: 8080
+    - name: http
+      port: 8080
       targetPort: 8080
       protocol: TCP
-      name: http
