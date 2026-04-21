@@ -17,6 +17,7 @@ log_info()    { echo -e "${BLUE}[INFO]${NC}  $*"; }
 log_success() { echo -e "${GREEN}[OK]${NC}    $*"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+log_step()    { echo -e "\n${BLUE}===${NC} ${GREEN}$*${NC} ${BLUE}===${NC}"; }
 
 # -----------------------------------------------------------------------------
 # Prereqs
