@@ -74,18 +74,6 @@ chmod +x "${SCRIPT_DIR}/02-vault-config.sh"
 log_step "STEP 5: Deploying PostgreSQL"
 kubectl apply -f "${SCRIPT_DIR}/03-postgres.yaml"
 
-log_info "Waiting for PostgreSQL to be ready (up to 5 min)..."
-kubectl rollout status deployment/postgres \
-  -n itssolutions-db \
-  --timeout=300s
-log_success "PostgreSQL is ready"
-
-# =============================================================================
-# Step 6 — Deploy Backend
-# =============================================================================
-log_step "STEP 6: Deploying Backend"
-kubectl apply -f "${SCRIPT_DIR}/04-backend.yaml"
-
 VAULT_TOKEN=$(python3 -c "import json; print(json.load(open('/tmp/vault-init.json'))['root_token'])")
 
 kubectl exec -n vault vault-0 -- \
@@ -97,12 +85,45 @@ kubectl exec -n vault vault-0 -- \
     ttl=1h \
     max_ttl=24h
 
+log_info "Waiting for PostgreSQL to be ready (up to 5 min)..."
+kubectl rollout status deployment/postgres \
+  -n itssolutions-db \
+  --timeout=300s
+log_success "PostgreSQL is ready"
 
-log_info "Waiting for Backend to be ready (up to 5 min)..."
+# =============================================================================
+# Step 6 — Deploy Backend
+# =============================================================================
+# Step 6 — Deploy Backend
+
+log_step "STEP 6: Deploying Backend"
+kubectl apply -f "${SCRIPT_DIR}/04-backend.yaml"
+
+log_info "Waiting for Backend to be ready (up to 10 min — npm install on first start)..."
 kubectl rollout status deployment/backend \
   -n itssolutions-prod \
-  --timeout=300s
+  --timeout=600s
+
 log_success "Backend is ready"
+
+# Show pod status
+kubectl get pods -n itssolutions-prod -l app=backend
+
+# Get a pod name
+BACKEND_POD=$(kubectl get pod -n itssolutions-prod -l app=backend \
+  -o jsonpath='{.items[0].metadata.name}')
+
+# Show backend logs
+log_info "Backend logs:"
+kubectl logs -n itssolutions-prod "${BACKEND_POD}" -c backend --tail=30
+
+# Confirm secrets present
+log_info "Injected secret files:"
+kubectl exec -n itssolutions-prod "${BACKEND_POD}" -c backend -- \
+  ls -la /vault/secrets/
+
+log_success "Step 6 complete"
+
 
 # =============================================================================
 # Step 7 — Deploy Frontend
@@ -119,9 +140,9 @@ log_success "Frontend is ready"
 # =============================================================================
 # Step 8 — Apply Routes / Ingress
 # =============================================================================
-log_step "STEP 8: Applying Routes"
-kubectl apply -f "${SCRIPT_DIR}/06-routes.yaml"
-log_success "Routes applied"
+#log_step "STEP 8: Applying Routes"
+#kubectl apply -f "${SCRIPT_DIR}/06-routes.yaml"
+#log_success "Routes applied"
 
 # =============================================================================
 # Final Summary
