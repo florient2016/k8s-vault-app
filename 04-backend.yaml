@@ -531,8 +531,8 @@ spec:
         - name: backend
           #image: node:18-alpine
           image: komlan2019/itssolutions-backend:latest
-          imagePullPolicy: IfNotPresent
-          #imagePullPolicy: Never
+          #imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
 
           command:
             - sh
