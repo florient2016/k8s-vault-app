@@ -205,6 +205,9 @@ log_success "Step 6 complete"
 # Step 7 — Deploy Frontend
 # =============================================================================
 log_step "STEP 7: Deploying Frontend"
+
+#kubectl create configmap frontend-html  --from-file=index.html=./index.html  -n itssolutions-prod
+
 kubectl apply -f "${SCRIPT_DIR}/05-frontend.yaml"
 
 sleep 40
