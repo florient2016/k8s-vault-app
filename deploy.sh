@@ -175,7 +175,7 @@ kubectl exec -n itssolutions-db $POSTGRES_POD \
 
 kubectl rollout restart deployment/backend -n itssolutions-prod
 
-log_info "Waiting for Backend to be ready (up to 10 min — npm install on first start)..."
+#log_info "Waiting for Backend to be ready (up to 10 min — npm install on first start)..."
 kubectl rollout status deployment/backend \
   -n itssolutions-prod \
   --timeout=600s
@@ -206,6 +206,32 @@ log_success "Step 6 complete"
 # =============================================================================
 log_step "STEP 7: Deploying Frontend"
 kubectl apply -f "${SCRIPT_DIR}/05-frontend.yaml"
+
+sleep 40
+
+kubectl patch deployment frontend -n itssolutions-prod --type=json -p='[
+  {
+    "op": "add",
+    "path": "/spec/template/spec/volumes/-",
+    "value": {"name": "nginx-tmp", "emptyDir": {}}
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/volumes/-",
+    "value": {"name": "nginx-conf-d", "emptyDir": {}}
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/volumeMounts/-",
+    "value": {"name": "nginx-tmp", "mountPath": "/tmp"}
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/volumeMounts/-",
+    "value": {"name": "nginx-conf-d", "mountPath": "/etc/nginx/conf.d"}
+  }
+]'
+
 
 log_info "Waiting for Frontend to be ready (up to 3 min)..."
 kubectl rollout status deployment/frontend \
