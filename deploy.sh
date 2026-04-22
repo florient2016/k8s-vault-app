@@ -99,6 +99,9 @@ log_success "PostgreSQL is ready"
 log_step "STEP 6: Deploying Backend"
 
 
+kubectl apply -f "${SCRIPT_DIR}/04-backend.yaml"
+
+sleep 40
 
 # Get the password from Vault secrets file
 DB_PASS=$(kubectl exec -n itssolutions-prod \
@@ -161,7 +164,6 @@ kubectl exec -n itssolutions-db $POSTGRES_POD \
   -- psql -U itssolutions -d itssolutions_db -c "SELECT current_user, current_database();"
 
 
-kubectl apply -f "${SCRIPT_DIR}/04-backend.yaml"
 
 kubectl rollout restart deployment/backend -n itssolutions-prod
 
