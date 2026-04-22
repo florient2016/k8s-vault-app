@@ -163,6 +163,14 @@ kubectl exec -n itssolutions-db $POSTGRES_POD \
 kubectl exec -n itssolutions-db $POSTGRES_POD \
   -- psql -U itssolutions -d itssolutions_db -c "SELECT current_user, current_database();"
 
+# Extract password from vault-agent secret file
+DB_PASS=$(kubectl exec -n itssolutions-prod \
+  $(kubectl get pod -n itssolutions-prod -l app=backend -o jsonpath='{.items[0].metadata.name}') \
+  -c vault-agent -- cat /vault/secrets/db-creds | grep DB_PASSWORD | cut -d'"' -f2)
+
+# Set PostgreSQL password to exactly match Vault
+kubectl exec -n itssolutions-db $POSTGRES_POD \
+  -- psql -U postgres -c "ALTER USER itssolutions WITH PASSWORD '$DB_PASS';"
 
 
 kubectl rollout restart deployment/backend -n itssolutions-prod

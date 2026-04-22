@@ -30,10 +30,9 @@ data:
       include       /etc/nginx/mime.types;
       default_type  application/octet-stream;
 
-      # Logging
-      log_format main '$remote_addr -  $ remote_user [ $ time_local] '
-                      '"$request" $status  $ body_bytes_sent '
-                      '" $ http_referer" "$http_user_agent"';
+      log_format main '$remote_addr - $remote_user [$time_local] '
+                      '"$request" $status $body_bytes_sent '
+                      '"$http_referer" "$http_user_agent"';
       access_log /var/log/nginx/access.log main;
 
       sendfile        on;
@@ -45,7 +44,6 @@ data:
                       application/javascript text/xml application/xml
                       application/xml+rss text/javascript;
 
-      # Security headers
       add_header X-Frame-Options           "SAMEORIGIN"        always;
       add_header X-Content-Type-Options    "nosniff"           always;
       add_header X-XSS-Protection          "1; mode=block"     always;
@@ -59,7 +57,6 @@ data:
         root         /usr/share/nginx/html;
         index        index.html;
 
-        # Proxy /api/ to backend service
         location /api/ {
           proxy_pass         http://backend.itssolutions-prod.svc.cluster.local:3000;
           proxy_http_version 1.1;
@@ -71,19 +68,16 @@ data:
           proxy_read_timeout    60s;
         }
 
-        # Health check for backend via nginx
         location /health {
           proxy_pass http://backend.itssolutions-prod.svc.cluster.local:3000/health;
           proxy_http_version 1.1;
           proxy_set_header Host $host;
         }
 
-        # SPA fallback — all routes served by index.html
         location / {
           try_files $uri $uri/ /index.html;
         }
 
-        # Deny dot files
         location ~ /\. {
           deny all;
         }
@@ -111,7 +105,7 @@ data:
       <meta charset="UTF-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-      <title>ITS Solutions — Login</title>
+      <title>ITS Solutions — Secure Portal</title>
       <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -137,3 +131,483 @@ data:
           min-height: 100vh;
           display: flex;
           align-items: center;
+          justify-content: center;
+        }
+
+        .card {
+          background: var(--surface);
+          border-radius: var(--radius);
+          box-shadow: var(--shadow);
+          padding: 2.5rem 2rem;
+          width: 100%;
+          max-width: 420px;
+        }
+
+        .logo {
+          text-align: center;
+          margin-bottom: 2rem;
+        }
+
+        .logo h1 {
+          font-size: 1.6rem;
+          font-weight: 700;
+          color: var(--primary);
+          letter-spacing: -0.5px;
+        }
+
+        .logo p {
+          font-size: 0.85rem;
+          color: var(--muted);
+          margin-top: 0.25rem;
+        }
+
+        .form-group {
+          margin-bottom: 1.2rem;
+        }
+
+        label {
+          display: block;
+          font-size: 0.875rem;
+          font-weight: 500;
+          margin-bottom: 0.4rem;
+          color: var(--text);
+        }
+
+        input {
+          width: 100%;
+          padding: 0.6rem 0.85rem;
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          font-size: 0.95rem;
+          color: var(--text);
+          background: var(--bg);
+          transition: border-color 0.2s;
+          outline: none;
+        }
+
+        input:focus {
+          border-color: var(--primary);
+          background: var(--surface);
+        }
+
+        .btn {
+          width: 100%;
+          padding: 0.7rem;
+          background: var(--primary);
+          color: #fff;
+          border: none;
+          border-radius: var(--radius);
+          font-size: 1rem;
+          font-weight: 600;
+          cursor: pointer;
+          transition: background 0.2s;
+          margin-top: 0.5rem;
+        }
+
+        .btn:hover { background: var(--primary-dark); }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .alert {
+          padding: 0.7rem 1rem;
+          border-radius: var(--radius);
+          font-size: 0.875rem;
+          margin-bottom: 1rem;
+          display: none;
+        }
+
+        .alert.error   { background: #fee2e2; color: var(--danger);  border: 1px solid #fca5a5; display: block; }
+        .alert.success { background: #dcfce7; color: var(--success); border: 1px solid #86efac; display: block; }
+
+        /* Dashboard */
+        #dashboard { display: none; }
+
+        .dash-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 1.5rem;
+        }
+
+        .dash-header h2 { font-size: 1.2rem; color: var(--primary); }
+
+        .dash-grid {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 1rem;
+          margin-bottom: 1.5rem;
+        }
+
+        .stat-card {
+          background: var(--bg);
+          border-radius: var(--radius);
+          padding: 1rem;
+          text-align: center;
+          border: 1px solid var(--border);
+        }
+
+        .stat-card .val {
+          font-size: 1.8rem;
+          font-weight: 700;
+          color: var(--primary);
+        }
+
+        .stat-card .lbl {
+          font-size: 0.78rem;
+          color: var(--muted);
+          margin-top: 0.2rem;
+        }
+
+        .logout-btn {
+          background: none;
+          border: 1px solid var(--border);
+          border-radius: var(--radius);
+          padding: 0.35rem 0.85rem;
+          font-size: 0.82rem;
+          color: var(--muted);
+          cursor: pointer;
+          transition: all 0.2s;
+        }
+
+        .logout-btn:hover { border-color: var(--danger); color: var(--danger); }
+
+        .health-row {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          font-size: 0.82rem;
+          color: var(--muted);
+          margin-top: 1rem;
+        }
+
+        .dot {
+          width: 8px; height: 8px;
+          border-radius: 50%;
+          background: var(--muted);
+          display: inline-block;
+        }
+
+        .dot.up   { background: var(--success); }
+        .dot.down { background: var(--danger);  }
+      </style>
+    </head>
+    <body>
+
+      <!-- ── Login panel ── -->
+      <div class="card" id="loginCard">
+        <div class="logo">
+          <h1>ITS Solutions</h1>
+          <p>Secure Employee Portal</p>
+        </div>
+
+        <div class="alert" id="alertBox"></div>
+
+        <form id="loginForm" novalidate>
+          <div class="form-group">
+            <label for="username">Username</label>
+            <input id="username" type="text" placeholder="Enter your username"
+                   autocomplete="username" required />
+          </div>
+          <div class="form-group">
+            <label for="password">Password</label>
+            <input id="password" type="password" placeholder="Enter your password"
+                   autocomplete="current-password" required />
+          </div>
+          <button class="btn" type="submit" id="loginBtn">Sign In</button>
+        </form>
+      </div>
+
+      <!-- ── Dashboard panel ── -->
+      <div class="card" id="dashboard">
+        <div class="dash-header">
+          <h2>Welcome back, <span id="dashUser">—</span></h2>
+          <button class="logout-btn" id="logoutBtn">Sign out</button>
+        </div>
+
+        <div class="dash-grid">
+          <div class="stat-card">
+            <div class="val" id="statUptime">—</div>
+            <div class="lbl">Uptime (s)</div>
+          </div>
+          <div class="stat-card">
+            <div class="val" id="statEnv">—</div>
+            <div class="lbl">Environment</div>
+          </div>
+          <div class="stat-card">
+            <div class="val" id="statDb">—</div>
+            <div class="lbl">DB Status</div>
+          </div>
+          <div class="stat-card">
+            <div class="val" id="statVault">—</div>
+            <div class="lbl">Vault Secrets</div>
+          </div>
+        </div>
+
+        <div class="health-row">
+          <span class="dot" id="healthDot"></span>
+          <span id="healthMsg">Checking backend…</span>
+        </div>
+      </div>
+
+      <script>
+        const $ = id => document.getElementById(id);
+
+        // ── helpers ──────────────────────────────────────────────────────────
+        function showAlert(msg, type) {
+          const box = $('alertBox');
+          box.textContent = msg;
+          box.className = 'alert ' + type;
+        }
+
+        function clearAlert() {
+          const box = $('alertBox');
+          box.textContent = '';
+          box.className = 'alert';
+        }
+
+        function saveToken(token, username) {
+          sessionStorage.setItem('jwt', token);
+          sessionStorage.setItem('user', username);
+        }
+
+        function getToken()    { return sessionStorage.getItem('jwt');  }
+        function getUsername() { return sessionStorage.getItem('user'); }
+
+        function clearSession() {
+          sessionStorage.removeItem('jwt');
+          sessionStorage.removeItem('user');
+        }
+
+        // ── view toggle ──────────────────────────────────────────────────────
+        function showDashboard(username) {
+          $('loginCard').style.display  = 'none';
+          $('dashboard').style.display  = 'block';
+          $('dashUser').textContent     = username;
+          loadHealth();
+        }
+
+        function showLogin() {
+          $('dashboard').style.display  = 'none';
+          $('loginCard').style.display  = 'block';
+          $('loginForm').reset();
+          clearAlert();
+        }
+
+        // ── health poll ──────────────────────────────────────────────────────
+        async function loadHealth() {
+          try {
+            const r = await fetch('/health', {
+              headers: { Authorization: 'Bearer ' + getToken() }
+            });
+            const d = await r.json();
+
+            $('healthDot').className = 'dot up';
+            $('healthMsg').textContent = 'Backend reachable — ' + (d.status || 'ok');
+
+            $('statUptime').textContent = d.uptime   ? Math.round(d.uptime) : '✓';
+            $('statEnv').textContent    = d.environment || d.env || 'prod';
+            $('statDb').textContent     = (d.database === 'connected' || d.db === 'ok') ? '✓' : '?';
+            $('statVault').textContent  = (d.vault === 'ok' || d.secrets === 'loaded')  ? '✓' : '?';
+          } catch (e) {
+            $('healthDot').className   = 'dot down';
+            $('healthMsg').textContent = 'Backend unreachable';
+          }
+        }
+
+        // ── login ────────────────────────────────────────────────────────────
+        $('loginForm').addEventListener('submit', async e => {
+          e.preventDefault();
+          clearAlert();
+
+          const username = $('username').value.trim();
+          const password = $('password').value;
+
+          if (!username || !password) {
+            showAlert('Please enter both username and password.', 'error');
+            return;
+          }
+
+          const btn = $('loginBtn');
+          btn.disabled    = true;
+          btn.textContent = 'Signing in…';
+
+          try {
+            const res = await fetch('/api/auth/login', {
+              method:  'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body:    JSON.stringify({ username, password })
+            });
+
+            const data = await res.json();
+
+            if (res.ok && (data.token || data.accessToken)) {
+              const token = data.token || data.accessToken;
+              saveToken(token, data.username || username);
+              showDashboard(data.username || username);
+            } else {
+              showAlert(data.message || data.error || 'Invalid credentials.', 'error');
+            }
+          } catch (err) {
+            showAlert('Network error — cannot reach the server.', 'error');
+          } finally {
+            btn.disabled    = false;
+            btn.textContent = 'Sign In';
+          }
+        });
+
+        // ── logout ───────────────────────────────────────────────────────────
+        $('logoutBtn').addEventListener('click', () => {
+          clearSession();
+          showLogin();
+        });
+
+        // ── auto-restore session ─────────────────────────────────────────────
+        if (getToken()) {
+          showDashboard(getUsername());
+        }
+      </script>
+    </body>
+    </html>
+
+---
+# -----------------------------------------------------------------------------
+# Deployment — Frontend (Nginx)
+# -----------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: itssolutions-prod
+  labels:
+    app: frontend
+    tier: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: frontend
+        tier: web
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        fsGroup: 101
+
+      containers:
+        - name: frontend
+          image: nginx:1.27-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            - name: frontend-html
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
+              readOnly: true
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+        - name: frontend-html
+          configMap:
+            name: frontend-html
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+
+---
+# -----------------------------------------------------------------------------
+# Service — Frontend (ClusterIP, exposed via NodePort below)
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: itssolutions-prod
+  labels:
+    app: frontend
+spec:
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
+
+---
+# -----------------------------------------------------------------------------
+# Service — NodePort (external access on port 30080)
+# -----------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-nodeport
+  namespace: itssolutions-prod
+  labels:
+    app: frontend
+spec:
+  selector:
+    app: frontend
+  type: NodePort
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      nodePort: 30080
+      protocol: TCP
