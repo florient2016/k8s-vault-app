@@ -122,8 +122,8 @@ EOF
 POSTGRES_POD=$(kubectl get pod -n itssolutions-db -l app=postgres -o jsonpath='{.items[0].metadata.name}')
 
 # Create the user
-kubectl exec -n itssolutions-db $POSTGRES_POD \
-  -- psql -U postgres -c "CREATE USER itssolutions WITH PASSWORD '$DB_PASS';"
+#kubectl exec -n itssolutions-db $POSTGRES_POD \
+#  -- psql -U postgres -c "CREATE USER itssolutions WITH PASSWORD '$DB_PASS';"
 
 # Grant privileges
 kubectl exec -n itssolutions-db $POSTGRES_POD \
