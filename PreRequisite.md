@@ -378,3 +378,10 @@ docker run --rm \
   "
 
 
+## Generate correct hash for Admin@1234
+python3 -c "import bcrypt; print(bcrypt.hashpw(b'Admin@1234', bcrypt.gensalt(12)).decode())"
+
+kubectl exec -n itssolutions-db \
+  $(kubectl get pod -n itssolutions-db -l app=postgres -o jsonpath='{.items[0].metadata.name}') \
+  -c postgres -- psql -U postgres -d itssolutions_db -c \
+  "UPDATE users SET password='\$2b\$12\$YOUR_GENERATED_HASH_HERE' WHERE username='admin';"
