@@ -194,9 +194,9 @@ log_info "Backend logs:"
 kubectl logs -n itssolutions-prod "${BACKEND_POD}" -c backend --tail=30
 
 # Confirm secrets present
-log_info "Injected secret files:"
-kubectl exec -n itssolutions-prod "${BACKEND_POD}" -c backend -- \
-  ls -la /vault/secrets/
+#log_info "Injected secret files:"
+#kubectl exec -n itssolutions-prod "${BACKEND_POD}" -c backend -- \
+#  ls -la /vault/secrets/
 
 log_success "Step 6 complete"
 
