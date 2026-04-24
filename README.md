@@ -1,109 +1,194 @@
-# ITS Solutions - OpenShift Application Deployment
+# k8s-vault-app
 
-## Table of Contents
+A Kubernetes-based application deployment solution with HashiCorp Vault integration for secrets management.
 
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [File Structure](#file-structure)
-- [Namespaces](#namespaces)
-- [Deployment Guide](#deployment-guide)
-  - [Step 1 - Create Namespaces](#step-1---create-namespaces)
-  - [Step 2 - Install Vault](#step-2---install-vault)
-  - [Step 3 - Deploy PostgreSQL](#step-3---deploy-postgresql)
-  - [Step 4 - Configure Vault](#step-4---configure-vault)
-  - [Step 5 - Deploy Backend](#step-5---deploy-backend)
-  - [Step 6 - Deploy Frontend](#step-6---deploy-frontend)
-  - [Step 7 - Create Routes](#step-7---create-routes)
-- [Default Credentials](#default-credentials)
-- [Security](#security)
-- [Troubleshooting](#troubleshooting)
-- [Cleanup](#cleanup)
-- [Notes](#notes)
+## Overview
 
----
+This project demonstrates a complete deployment pipeline for a multi-tier application on Kubernetes/OpenShift, featuring:
+- PostgreSQL database
+- Node.js/Express backend
+- Frontend service
+- HashiCorp Vault for secrets management
+- Vault Agent injection for pod-level secrets
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│         OpenShift Cluster                   │
+├─────────────────────────────────────────────┤
+│                                             │
+│  ┌──────────────────────────────────────┐  │
+│  │  itssolutions-prod (Namespace)       │  │
+│  │  ├─ Frontend (Pod)                   │  │
+│  │  ├─ Backend (Pod)                    │  │
+│  │  └─ Vault Agent Injector             │  │
+│  └──────────────────────────────────────┘  │
+│                                             │
+│  ┌──────────────────────────────────────┐  │
+│  │  itssolutions-db (Namespace)         │  │
+│  │  └─ PostgreSQL (Pod)                 │  │
+│  └──────────────────────────────────────┘  │
+│                                             │
+│  ┌──────────────────────────────────────┐  │
+│  │  vault-system (Namespace)            │  │
+│  │  └─ Vault Server                     │  │
+│  └──────────────────────────────────────┘  │
+└─────────────────────────────────────────────┘
+```
 
 ## Prerequisites
 
-Before deploying, ensure the following tools are installed and configured on your workstation:
+- Kubernetes 1.20+ or OpenShift 4.x
+- kubectl CLI configured
+- Docker installed (for building images)
+- Helm 3.x (for Vault deployment)
+- HashiCorp Vault 1.15+
 
-| Tool | Minimum Version | Purpose |
-|------|----------------|---------|
-| `oc` | 4.10+ | OpenShift CLI |
-| `kubectl` | 1.24+ | Kubernetes CLI |
-| `helm` | 3.10+ | Helm package manager |
-| `curl` | Any | HTTP requests during Vault setup |
-| `jq` | 1.6+ | JSON parsing for Vault responses |
-| `bash` | 4.0+ | Shell scripts execution |
+## Quick Start
 
-### OpenShift Cluster Requirements
-
-- OpenShift 4.10 or higher
-- Cluster-admin privileges (required for SCC, namespace creation, Helm install)
-- PersistentVolume provisioner available in the cluster
-- Vault Helm chart accessible (internet access or internal mirror)
-- Vault Agent Injector mutating webhook enabled after install
-
-### Verify Prerequisites
+### 1. Deploy
 
 ```bash
-# Check oc login
-oc whoami
-
-# Verify cluster-admin
-oc auth can-i create namespace --all-namespaces
-
-# Check Helm
-helm version
-
-# Check jq
-jq --version
-```
-
-### Quick Start
-Clone or download this repository, then run the full automated deployment:
-```bash
-# Clone repository
-git clone https://github.com/your-org/itssolutions-openshift.git
-cd itssolutions-openshift/k8s
-
-# Make scripts executable
-chmod +x deploy.sh cleanup.sh 01-vault-install.sh 02-vault-config.sh
-
-# Run full deployment
 ./deploy.sh
 ```
-The deploy.sh script will:
 
-1. Create all namespaces
-2. Apply SCC anyuid to required ServiceAccounts
-3. Install and initialize HashiCorp Vault
-4. Deploy PostgreSQL and wait for readiness
-5. Configure Vault secrets and policies
-6. Deploy the backend and wait for readiness
-7. Deploy the frontend
-8. Create OpenShift Routes with TLS
-9. Print the final HTTPS frontend URL
+This script will:
+- Create namespaces (itssolutions-prod, itssolutions-db)
+- Label namespaces for Vault injection
+- Deploy PostgreSQL database
+- Configure Vault with database secrets
+- Build and push Docker images
+- Deploy backend and frontend applications
+- Create OpenShift routes
 
-### File Structure
+### 2. Access the Application
+
+Once deployment completes:
+
+```
+✅ Application available at: https://<FRONTEND_URL>
+   Default credentials: admin / Admin@1234!
+```
+
+### 3. Cleanup
+
+To remove all resources:
+
 ```bash
+./cleanup.sh
+```
+
+## Configuration
+
+### Environment Variables
+
+In `deploy.sh`:
+
+```bash
+REGISTRY="image-registry.openshift-image-registry.svc:5000"
+NAMESPACE="itssolutions-prod"
+DB_NAMESPACE="itssolutions-db"
+VAULT_ADDR="http://vault.vault-system.svc.cluster.local:8200"
+```
+
+### Kubernetes Manifests
+
+```
 k8s/
-├── 00-namespace.yaml        # Namespace definitions
-├── 01-vault-install.sh      # Vault Helm install + init + unseal
-├── 02-vault-config.sh       # Vault secrets, policies, auth config
-├── 03-postgres.yaml         # PostgreSQL Deployment + PVC + Service
-├── 04-backend.yaml          # Node.js backend Deployment + Service
-├── 05-frontend.yaml         # Nginx frontend Deployment + Service
-├── 06-routes.yaml           # OpenShift Routes (TLS edge)
-├── deploy.sh                # Full automated deployment script
-└── cleanup.sh               # Full teardown script
+├── 00-namespace.yaml          # Namespace definitions
+├── 01-vault-config.yaml       # Vault configuration
+├── 02-postgres.yaml           # PostgreSQL StatefulSet
+├── 03-backend.yaml            # Backend Deployment
+├── 04-frontend.yaml           # Frontend Deployment
+└── 05-routes.yaml             # OpenShift Routes
 ```
-#### Namespaces
-The deployment uses three isolated namespaces:
-```bash
-| Namespace | Purpose | Resources |
-|-----------|---------|-----------|
-| `vault` | HashiCorp Vault server + agent injector | Vault Pod, Service, ServiceAccount |
-| `itssolutions-db` | PostgreSQL database | Deployment, PVC, Service, ServiceAccount |
-| `itssolutions-prod` | Frontend + Backend application | Deployments, Services, Routes, ServiceAccounts |
 
+## Vault Integration
+
+The application uses Vault for:
+- Database credentials management
+- Pod-level secrets injection via Vault Agent
+- Automatic secret rotation
+
+### Vault Agent Configuration
+
+Pods are annotated with:
+```yaml
+vault.hashicorp.com/agent-inject: "true"
+vault.hashicorp.com/agent-inject-secret-db: "secret/data/postgres"
+vault.hashicorp.com/role: "backend"
 ```
+
+## Deployment Flow
+
+1. **Namespace Creation** - Creates isolated namespaces
+2. **Label Namespaces** - Enables Vault injection for pods
+3. **Database Setup** - Deploys PostgreSQL
+4. **Vault Configuration** - Initializes Vault with database credentials
+5. **Image Build** - Builds and pushes Docker images to registry
+6. **Application Deployment** - Deploys backend and frontend
+7. **Route Creation** - Exposes services via OpenShift routes
+
+## Cleanup Process
+
+The cleanup script removes:
+- Application namespaces
+- Vault Helm release
+- Cluster-level RBAC bindings
+- Vault Agent Injector configuration
+- Mutating webhook configurations
+
+## Troubleshooting
+
+### Pod fails to start with Vault injection error
+```bash
+kubectl logs -n itssolutions-prod <pod-name> -c vault-agent
+```
+
+### Database connection issues
+```bash
+kubectl exec -n itssolutions-db postgres-0 -- psql -U postgres -c "\l"
+```
+
+### Vault not accessible
+```bash
+kubectl run vault-debug --rm -it --image=alpine:latest -n itssolutions-prod -- sh
+```
+
+### Image registry authentication
+Ensure ImagePullSecrets are configured in namespace for private registries.
+
+## Security Considerations
+
+- Vault Root Token should be stored securely (not in scripts)
+- Use OpenShift service accounts for Vault authentication
+- Implement network policies to restrict pod communication
+- Enable SSL/TLS for Vault communication in production
+- Rotate database credentials regularly
+
+## Monitoring
+
+Check deployment status:
+
+```bash
+# Pods
+kubectl get pods -n itssolutions-prod
+kubectl get pods -n itssolutions-db
+
+# Services
+kubectl get svc -n itssolutions-prod
+
+# Routes
+kubectl get routes -n itssolutions-prod
+
+# Vault status
+kubectl exec -n vault-system vault-0 -- vault status
+```
+
+## Support
+
+For issues or questions, refer to:
+- [Kubernetes Documentation](https://kubernetes.io/docs/)
+- [HashiCorp Vault Documentation](https://www.vaultproject.io/docs)
+- [OpenShift Documentation](https://docs.openshift.com/)
