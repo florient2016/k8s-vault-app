@@ -385,3 +385,6 @@ kubectl exec -n itssolutions-db \
   $(kubectl get pod -n itssolutions-db -l app=postgres -o jsonpath='{.items[0].metadata.name}') \
   -c postgres -- psql -U postgres -d itssolutions_db -c \
   "UPDATE users SET password='\$2b\$12\$YOUR_GENERATED_HASH_HERE' WHERE username='admin';"
+
+# Port forward vault UI to localhost
+kubectl port-forward -n vault vault-0 8200:8200 --address=0.0.0.0 &
