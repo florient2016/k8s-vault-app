@@ -29,6 +29,7 @@ done
 VAULT_NAMESPACE="vault"
 VAULT_RELEASE="vault"
 INIT_FILE="/tmp/vault-init.json"
+VAULT_ENV_FILE="./vault-env.sh"
 
 # -----------------------------------------------------------------------------
 # Step 1 — Helm repo
