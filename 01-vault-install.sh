@@ -2,7 +2,7 @@
 # =============================================================================
 # 01-vault-install.sh
 # Installs HashiCorp Vault via Helm using local-storage StorageClass
-# Exports ROOT_TOKEN to environment for retrieval
+# NO credentials stored anywhere except inside Vault itself
 # =============================================================================
 
 set -euo pipefail
@@ -19,36 +19,29 @@ log_warn()    { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error()   { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 log_step()    { echo -e "\n${BLUE}===${NC} ${GREEN}$*${NC} ${BLUE}===${NC}"; }
 
-# Ensure cleanup on exit
-cleanup() {
-  if [[ -f "${INIT_FILE}" ]]; then
-    chmod 600 "${INIT_FILE}"
-  fi
-}
-trap cleanup EXIT
-
-# Prerequisites
-for cmd in helm kubectl jq python3; do
+# -----------------------------------------------------------------------------
+# Prereqs
+# -----------------------------------------------------------------------------
+for cmd in helm kubectl jq; do
   command -v "$cmd" &>/dev/null || log_error "Required tool not found: $cmd"
 done
 
 VAULT_NAMESPACE="vault"
 VAULT_RELEASE="vault"
 INIT_FILE="/tmp/vault-init.json"
-VAULT_ENV_FILE="${HOME}/.vault-env"
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Step 1 — Helm repo
-# =============================================================================
-log_step "Adding HashiCorp Helm repository"
+# -----------------------------------------------------------------------------
+log_info "Adding HashiCorp Helm repository..."
 helm repo add hashicorp https://helm.releases.hashicorp.com 2>/dev/null || true
-helm repo update > /dev/null
+helm repo update
 log_success "Helm repo ready"
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Step 2 — Install Vault
-# =============================================================================
-log_step "Installing Vault in namespace '${VAULT_NAMESPACE}'"
+# -----------------------------------------------------------------------------
+log_info "Installing Vault in namespace '${VAULT_NAMESPACE}'..."
 
 helm upgrade --install "${VAULT_RELEASE}" hashicorp/vault \
   --namespace "${VAULT_NAMESPACE}" \
@@ -69,10 +62,10 @@ helm upgrade --install "${VAULT_RELEASE}" hashicorp/vault \
 
 log_success "Helm chart applied"
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Step 3 — Wait for vault-0 pod Running
-# =============================================================================
-log_step "Waiting for vault-0 pod to reach Running state (up to 5 min)"
+# -----------------------------------------------------------------------------
+log_info "Waiting for vault-0 pod to reach Running state (up to 5 min)..."
 
 for i in $(seq 1 60); do
   POD_PHASE=$(kubectl get pod vault-0 -n "${VAULT_NAMESPACE}" \
@@ -86,85 +79,89 @@ for i in $(seq 1 60); do
   PVC_STATUS=$(kubectl get pvc -n "${VAULT_NAMESPACE}" \
     -o jsonpath='{range .items[*]}{.metadata.name}={.status.phase} {end}' \
     2>/dev/null || echo "none")
-  
-  if (( i % 3 == 0 )); then
-    log_warn "Attempt ${i}/60 — Pod: ${POD_PHASE} | PVCs: ${PVC_STATUS}"
-  fi
+  log_warn "Attempt ${i}/60 — Pod: ${POD_PHASE} | PVCs: ${PVC_STATUS}"
   sleep 5
 done
 
 POD_PHASE=$(kubectl get pod vault-0 -n "${VAULT_NAMESPACE}" \
   -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
 [[ "${POD_PHASE}" == "Running" ]] || \
-  log_error "vault-0 not Running after 5 min (current: ${POD_PHASE})"
+  log_error "vault-0 not Running after 5 min"
 
 # =============================================================================
-# Step 4 — Initialize and Unseal Vault
+# STEP 4 — Initialize and Unseal Vault
 # =============================================================================
-log_step "Initializing and unsealing Vault"
+log_step "STEP 4: Initializing and unsealing Vault"
+
+INIT_FILE="/tmp/vault-init.json"
 
 # Check if Vault is already initialized
-INITIALIZED=$(kubectl exec -n "${VAULT_NAMESPACE}" vault-0 -- \
-  vault status -format=json 2>/dev/null | \
-  python3 -c "import sys,json; print(json.load(sys.stdin).get('initialized', False))" 2>/dev/null || echo "false")
+INITIALIZED=$(kubectl exec -n vault vault-0 -- \
+  vault status -format=json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['initialized'])" 2>/dev/null || echo "false")
 
-if [[ "${INITIALIZED}" == "true" ]]; then
-  log_warn "Vault is already initialized"
+if [ "${INITIALIZED}" = "True" ] || [ "${INITIALIZED}" = "true" ]; then
+  log_info "Vault is already initialized"
 
-  if [[ -f "${INIT_FILE}" ]]; then
+  if [ -f "${INIT_FILE}" ]; then
     log_info "Found existing init file at ${INIT_FILE}"
   else
-    log_error "Vault is initialized but ${INIT_FILE} not found"
-    log_error "Cannot proceed without unseal keys"
+    log_error "Vault is initialized but ${INIT_FILE} not found — cannot unseal automatically"
+    log_error "Manually provide the unseal key and root token, then re-run"
     exit 1
   fi
 else
   log_info "Initializing Vault (1 key share, threshold 1)..."
-  kubectl exec -n "${VAULT_NAMESPACE}" vault-0 -- \
+  kubectl exec -n vault vault-0 -- \
     vault operator init -key-shares=1 -key-threshold=1 -format=json \
     > "${INIT_FILE}"
-  
-  chmod 600 "${INIT_FILE}"
   log_success "Vault initialized — credentials saved to ${INIT_FILE}"
 fi
 
-# Extract unseal key and root token
+# Read unseal key and root token from file
 UNSEAL_KEY=$(python3 -c "import json; d=json.load(open('${INIT_FILE}')); print(d['unseal_keys_b64'][0])")
 ROOT_TOKEN=$(python3 -c "import json; d=json.load(open('${INIT_FILE}')); print(d['root_token'])")
 
 # Check if Vault is sealed
-SEALED=$(kubectl exec -n "${VAULT_NAMESPACE}" vault-0 -- \
-  vault status -format=json 2>/dev/null | \
-  python3 -c "import sys,json; print(json.load(sys.stdin).get('sealed', True))" 2>/dev/null || echo "true")
+SEALED=$(kubectl exec -n vault vault-0 -- \
+  vault status -format=json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['sealed'])" 2>/dev/null || echo "true")
 
-if [[ "${SEALED}" == "true" ]]; then
+if [ "${SEALED}" = "True" ] || [ "${SEALED}" = "true" ]; then
   log_info "Unsealing Vault..."
-  kubectl exec -n "${VAULT_NAMESPACE}" vault-0 -- \
-    vault operator unseal "${UNSEAL_KEY}" > /dev/null
+  kubectl exec -n vault vault-0 -- vault operator unseal "${UNSEAL_KEY}"
   log_success "Vault unsealed"
 else
   log_info "Vault is already unsealed"
 fi
 
-# =============================================================================
-# Step 5 — Verify
-# =============================================================================
-log_step "Verifying Vault status"
-kubectl exec -n "${VAULT_NAMESPACE}" vault-0 -- vault status
+log_success "Vault is ready (initialized and unsealed)"
 
-# =============================================================================
-# Step 6 — Export credentials to environment
-# =============================================================================
-log_step "Saving credentials to environment"
 
-# Export to current shell environment (for immediate use)
+# -----------------------------------------------------------------------------
+# Step 5 — Unseal
+# -----------------------------------------------------------------------------
+UNSEAL_KEY=$(jq -r '.unseal_keys_b64[0]' "${INIT_FILE}")
+
+log_info "Unsealing Vault..."
+kubectl exec -n "${VAULT_NAMESPACE}" vault-0 -- \
+  vault operator unseal "${UNSEAL_KEY}"
+
+log_success "Vault unsealed"
+
+# -----------------------------------------------------------------------------
+# Verify
+# -----------------------------------------------------------------------------
+log_info "Vault status:"
+kubectl exec -n "${VAULT_NAMESPACE}" vault-0 -- vault status || true
+
+ROOT_TOKEN=$(jq -r '.root_token' "${INIT_FILE}")
+
 export ROOT_TOKEN
 export UNSEAL_KEY
 export VAULT_NAMESPACE
 export VAULT_RELEASE
 export INIT_FILE
 
-# Save to file for persistence across shells
+
 cat > "${VAULT_ENV_FILE}" <<EOF
 #!/usr/bin/env bash
 # Vault credentials — sourced from 01-vault-install.sh
@@ -184,53 +181,10 @@ alias vault-login="export VAULT_TOKEN=\${ROOT_TOKEN}"
 alias vault-status="kubectl exec -n ${VAULT_NAMESPACE} vault-0 -- vault status"
 EOF
 
-chmod 600 "${VAULT_ENV_FILE}"
-
-# =============================================================================
-# Summary
-# =============================================================================
 echo ""
-log_success "╔════════════════════════════════════════════════════════╗"
-log_success "║        VAULT INSTALLATION COMPLETE                    ║"
-log_success "╚════════════════════════════════════════════════════════╝"
-echo ""
-echo -e "  ${GREEN}Environment File${NC}:    ${VAULT_ENV_FILE}"
-echo -e "  ${GREEN}Init File${NC}:           ${INIT_FILE}"
-echo -e "  ${GREEN}Namespace${NC}:          ${VAULT_NAMESPACE}"
-echo -e "  ${GREEN}Pod Status${NC}:         Running ✓"
-echo ""
-log_success "Current shell environment variables:"
-echo -e "  ${YELLOW}ROOT_TOKEN${NC}:          ${ROOT_TOKEN:0:20}…"
-echo -e "  ${YELLOW}UNSEAL_KEY${NC}:         ${UNSEAL_KEY:0:20}…"
-echo -e "  ${YELLOW}INIT_FILE${NC}:          ${INIT_FILE}"
-echo ""
-log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-log_warn "IMPORTANT SECURITY NOTES:"
-log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "  1. Keep ${INIT_FILE} in a SECURE location"
-echo "     (chmod 600 — readable only by you)"
-echo ""
-echo "  2. Root token is available in current shell:"
-echo "     echo \$ROOT_TOKEN"
-echo ""
-echo "  3. To source credentials in another shell:"
-echo "     source ${VAULT_ENV_FILE}"
-echo ""
-echo "  4. Vault UI available at: http://localhost:8200"
-echo "     (After: kubectl port-forward -n vault svc/vault 8200:8200)"
-echo ""
-echo "  5. To access vault CLI inside cluster:"
-echo "     kubectl exec -n ${VAULT_NAMESPACE} vault-0 -- vault login \${ROOT_TOKEN}"
-echo ""
-log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-
-# Verify exported variables
-log_info "Verifying exported variables..."
-[[ -n "${ROOT_TOKEN}" ]] && log_success "✓ ROOT_TOKEN exported" || log_error "ROOT_TOKEN not set"
-[[ -n "${UNSEAL_KEY}" ]] && log_success "✓ UNSEAL_KEY exported" || log_error "UNSEAL_KEY not set"
-[[ -f "${VAULT_ENV_FILE}" ]] && log_success "✓ Credentials file created: ${VAULT_ENV_FILE}" || log_error "Env file not created"
-
-echo ""
-log_success "All systems ready!"
+log_success "============================================"
+log_success " Vault installation complete"
+log_success " Init file : ${INIT_FILE}  (chmod 600)"
+log_success " Root token: ${ROOT_TOKEN}"
+log_success "============================================"
+log_warn "Keep ${INIT_FILE} safe — it contains your unseal key and root token"
